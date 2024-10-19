@@ -1,0 +1,15 @@
+# ignore python compiled / optimized files
+__pycache__/
+*.py[cod]
+
+# ignore vscode settigns
+.vscode/
+# ignore pycharm settings
+.idea/
+# ignore raw data directories
+ccdc_data/
+cod_data/
+data/
+# igrore model results directories
+models/
+results/
