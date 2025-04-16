@@ -7,7 +7,7 @@ import networkx as nx
 from scipy import stats
 from networkx.algorithms import isomorphism
 import os
-from openbabel import openbabel as ob
+import openbabel as ob
 from typing import List
 from sklearn.base import BaseEstimator
 from sklearn.model_selection import train_test_split

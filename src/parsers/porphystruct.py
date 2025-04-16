@@ -2,6 +2,7 @@
 import os
 import json
 import utils
+import config
 from read_to_sql import StructureProperty
 
 def json_to_dicts(parameters: dict):
@@ -26,14 +27,14 @@ def json_to_dicts(parameters: dict):
         entries.append({"property": "metal - {} distance".format(pname), "value": d["Value"], "units": "A"})
     return entries
 
-def entries_for_structure(stype: str):
-    json_dir = utils.get_directory("nonplanarity", stype)
+def entries_for_structure(json_dir):
     ajr = []
+    source = os.path.split(json_dir)[-1]
     for fname in os.listdir(json_dir):
         sid = fname.split("_")[0]
         with open(os.path.join(json_dir, fname), "r") as f:
             parameters = json.load(f)
-            ajr += [StructureProperty(structure=sid, source="porphystruct", **kwargs) for kwargs in json_to_dicts(parameters)]
+            ajr += [StructureProperty(structure=sid, source="porphystruct-" + source, **kwargs) for kwargs in json_to_dicts(parameters)]
     return ajr
 
 
@@ -41,11 +42,12 @@ def main(session, n):
     print("=" * 10, "READING STRUCTURE PORPHYSTRUCT CALCULATION RESULTS", "=" * 10)
     if n > 1:
         print("WARNING: you requested more than 1 process for this parser, it cannot be parallelized, so we use 1.")
-    print("reading corrole details...")
-    ajr = entries_for_structure("corroles")
+    json_dir = os.path.join(config.DATA_DIR, "nonplanarity", "orca")
+    ajr = entries_for_structure(json_dir)
     session.add_all(ajr)
-    print("reading porphyrin details...")
-    ajr = entries_for_structure("porphyrins")
+    session.commit()
+    json_dir = os.path.join(config.DATA_DIR, "nonplanarity", "crystal")
+    ajr = entries_for_structure(json_dir)
     session.add_all(ajr)
     session.commit()
     print("ALL DONE")

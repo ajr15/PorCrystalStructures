@@ -17,6 +17,8 @@ class Structure (SqlBase):
     xyz = Column(String)
     cif = Column(String)
     smiles = Column(String)
+    orca_out = Column(String)
+    orca_xyz = Column(String)
 
 
 class Substituent (SqlBase):
