@@ -51,7 +51,7 @@ AXIAL_POSITIONS = [["axial1", "axial2"], ["axial2", "axial1"]]
 STYPE = "porphyrin"
 
 def reduced_distances_helper(pname, session, sid):
-    feat = SubstituentPropertyFeaturizer(pname, None, MACROCYCLE_POSITIONS[0], navalue=None)
+    feat = SubstituentPropertyFeaturizer(pname, MACROCYCLE_POSITIONS[0], navalue=None)
     df = feat.featurize(session, [sid])
     df["beta-beta"] = np.mean(df[["beta1", "beta3", "beta5", "beta7"]].values)
     df["beta-meso"] = np.mean(df[["meso" + str(i + 1) for i in range(4)] + ["beta2", "beta4", "beta6", "beta8"]].values)
@@ -61,14 +61,14 @@ def reduced_distances(pname):
     return lambda session, sid: reduced_distances_helper(pname, session, sid)
 
 def reduced_cone_angles(session, sid):
-    feat = SubstituentPropertyFeaturizer("cone angle", None, MACROCYCLE_POSITIONS[0], navalue=-1)
+    feat = SubstituentPropertyFeaturizer("cone angle", MACROCYCLE_POSITIONS[0], navalue=-1)
     df = feat.featurize(session, [sid])
     df["beta"] = np.mean(df[[c for c in df.columns if "beta" in c]].values)
     df["meso"] = np.mean(df[[c for c in df.columns if "meso" in c]].values)
     return df[["beta", "meso"]].values.tolist()[0]
 
 def axial_features(session, sid):
-    feat = SubstituentPropertyFeaturizer("cone angle", None, AXIAL_POSITIONS[0], navalue=-1)
+    feat = SubstituentPropertyFeaturizer("cone angle", AXIAL_POSITIONS[0], navalue=-1)
     df = feat.featurize(session, [sid])
     empty_spots = np.sum(df.eq(-1).values)
     axial_angles = df[~df.eq(-1)].dropna(axis=1).values[0]
@@ -82,18 +82,18 @@ def avg_pyrrole_homa(session, sid):
     return np.mean(feat.featurize(session, [sid]).values)
 
 def mixed_angle_distance(session, sid):
-    feat = SubstituentPropertyFeaturizer("covalent nn dist", None, MACROCYCLE_POSITIONS[0], navalue=None) +\
-            SubstituentPropertyFeaturizer("cone angle", None, MACROCYCLE_POSITIONS[0], navalue=-1)
+    feat = SubstituentPropertyFeaturizer("covalent nn dist", MACROCYCLE_POSITIONS[0], navalue=None) +\
+            SubstituentPropertyFeaturizer("cone angle", MACROCYCLE_POSITIONS[0], navalue=-1)
     return feat.featurize(session, [sid]).values
 
 
 MEATL_AXIAL_FEATURES = FunctionFeaturizer(["coordination", "axial_angle"], axial_features, -1) + FunctionFeaturizer("metal_radius", metal_radius, navalue=None)
 
 FEATURIZERS = {
-    "cone_angles": SubstituentPropertyFeaturizer("cone angle", None, MACROCYCLE_POSITIONS[0], navalue=-1) + MEATL_AXIAL_FEATURES,
-    "vdw_distances": SubstituentPropertyFeaturizer("vdw nn dist", None, MACROCYCLE_POSITIONS[0], navalue=None) + MEATL_AXIAL_FEATURES,
-    "covalent_distances": SubstituentPropertyFeaturizer("covalent nn dist", None, MACROCYCLE_POSITIONS[0], navalue=None) + MEATL_AXIAL_FEATURES,
-    "nn_distances": SubstituentPropertyFeaturizer("None nn dist", None, MACROCYCLE_POSITIONS[0], navalue=None) + MEATL_AXIAL_FEATURES,
+    "cone_angles": SubstituentPropertyFeaturizer("cone angle", MACROCYCLE_POSITIONS[0], navalue=-1) + MEATL_AXIAL_FEATURES,
+    "vdw_distances": SubstituentPropertyFeaturizer("vdw nn dist", MACROCYCLE_POSITIONS[0], navalue=None) + MEATL_AXIAL_FEATURES,
+    "covalent_distances": SubstituentPropertyFeaturizer("covalent nn dist", MACROCYCLE_POSITIONS[0], navalue=None) + MEATL_AXIAL_FEATURES,
+    "nn_distances": SubstituentPropertyFeaturizer("None nn dist", MACROCYCLE_POSITIONS[0], navalue=None) + MEATL_AXIAL_FEATURES,
     "reduced_vdw_distances": FunctionFeaturizer(["beta-beta", "beta-meso"], reduced_distances("vdw nn dist"), None) + MEATL_AXIAL_FEATURES,
     "reduced_cone_angles": FunctionFeaturizer(["beta_angle", "meso_angle"], reduced_cone_angles, None) + MEATL_AXIAL_FEATURES,
     "angles_and_distances": FunctionFeaturizer(["beta_angle", "meso_angle"], reduced_cone_angles, None) + FunctionFeaturizer(["beta-beta", "beta-meso"], reduced_distances("vdw nn dist"), None) + MEATL_AXIAL_FEATURES,

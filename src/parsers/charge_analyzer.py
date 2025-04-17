@@ -1,8 +1,26 @@
 # script to use the axial ligand data and structure type information to infer the metal charge in the complex
 # first, analyze the charges of the axial ligands and then analyze metal charges
+import numpy as np
 from openbabel import openbabel as ob
 import utils
 from read_to_sql import SubstituentProperty, Substituent, Structure
+
+PERIODIC_TABLE_BLOCKS = {
+    "S": [1, 3, 11, 19, 37, 55, 87],
+    "P": [1000, 5, 13, 31, 49, 81, 113],
+    "D": [1000, 1000, 1000, 21, 39, 71, 103],
+    "F": [1000, 1000, 1000, 1000, 1000, 57, 89]
+}
+
+MAX_POPULATION = {
+    "S": 2,
+    "P": 6,
+    "D": 10,
+    "F": 14
+}
+
+S1_D_BLOCK = [24, 29, 41, 42, 44, 45, 47, 78, 79, 110, ]
+S0_D_BLOCK = [46]
 
 def number_of_available_bonds(atom: ob.OBAtom):
     nbonds = sum([b.GetBondOrder() for b in ob.OBAtomBondIter(atom)])
@@ -70,7 +88,7 @@ def axial_ligand_analysis(session):
         ligand = ligand[0]
         mol = utils.mol_from_smiles(ligand)
         charge = axial_ligand_charge(mol)
-        entry = SubstituentProperty(smiles=ligand, property="charge", value=charge, source="openbabel")
+        entry = SubstituentProperty(smiles=ligand, property="charge", value=charge, source="charge_analyzer")
         print(ligand, charge)
         entries.append(entry)
     session.add_all(entries)
@@ -92,24 +110,78 @@ def get_axial_charge(session, sid: int):
         tcharge += c
     return tcharge
 
+
 def get_metal(session, sid: int):
     return session.query(Substituent.substituent).filter(Substituent.structure == sid).filter(Substituent.position == "metal").all()[0][0]
+
+
+def electron_configuration(z: int):
+    """figure out the number of d electrons in an atom (given atomic number). returns the population as an n, (n-2)f, (n-1)d, (n)s, (n)p where n is the valence level"""
+    # figure out the row in the periodic table
+    row = len(PERIODIC_TABLE_BLOCKS["S"]) - [z >= x for x in reversed(PERIODIC_TABLE_BLOCKS["S"])].index(True) - 1
+    # figure out the block in the table
+    keys = list(PERIODIC_TABLE_BLOCKS.keys())
+    values = [x[row] for x in PERIODIC_TABLE_BLOCKS.values()]
+    block_limits = list(sorted(values, reverse=True))
+    blocks = list(sorted(keys, key=lambda x: values[keys.index(x)], reverse=True))
+    block_idx = [z >= x for x in block_limits].index(True)
+    block = blocks[block_idx]
+    # building basic cofiguration
+    ajr = {"S": 0, "P": 0, "D": 0, "F": 0}
+    for b in ajr.keys():
+        if block != b and z > PERIODIC_TABLE_BLOCKS[b][row]:
+            ajr[b] = MAX_POPULATION[b]
+    ajr[block] = z - PERIODIC_TABLE_BLOCKS[block][row] + 1
+    # fixing for unique D cases
+    if block == "D" and z in S1_D_BLOCK:
+        ajr["S"] = 1
+        ajr["D"] += 1
+    if block == "D" and z in S0_D_BLOCK:
+        ajr["S"] = 0
+        ajr["D"] += 2
+    ajr["n"] = row + 1
+    return [row + 1, ajr["F"], ajr["D"], ajr["S"], ajr["P"]]
+
+def ionized_configuration(z, charge):
+    base_configuration = electron_configuration(z)
+    idx = -1
+    counter = 0
+    while counter < charge:
+        if base_configuration[idx] > 0:
+            base_configuration[idx] -= 1
+            counter += 1
+        else:
+            idx = idx - 1
+    return base_configuration
+
 
 def metal_charge_analysis(session):
     sids = session.query(Structure.id).all()
     entries = []
     for sid in sids:
         sid = sid[0]
-        base_c = get_macrocycle_charge(session, sid)
+        base_c = -2
         axial_c = get_axial_charge(session, sid)
         metal_charge = - (base_c + axial_c)
         smiles = get_metal(session, sid)
-        print(smiles, metal_charge)
-        entries.append(SubstituentProperty(smiles=smiles, property="charge", value=metal_charge, source="openbabel", structure=sid))
+        z = ob.GetAtomicNum(smiles[1:-1])
+        configuration = ionized_configuration(z, metal_charge)
+        print(smiles, metal_charge, configuration)
+        entries.append(SubstituentProperty(smiles=smiles, property="charge", value=metal_charge, source="charge_analyzer", structure=sid))
+        entries.append(SubstituentProperty(smiles=smiles, property="p_population", value=configuration[-1], source="charge_analyzer", structure=sid))
+        entries.append(SubstituentProperty(smiles=smiles, property="s_population", value=configuration[-2], source="charge_analyzer", structure=sid))
+        entries.append(SubstituentProperty(smiles=smiles, property="d_population", value=configuration[-3], source="charge_analyzer", structure=sid))
+        entries.append(SubstituentProperty(smiles=smiles, property="f_population", value=configuration[-4], source="charge_analyzer", structure=sid))
+        entries.append(SubstituentProperty(smiles=smiles, property="valence_level", value=configuration[-5], source="charge_analyzer", structure=sid))
+
     session.add_all(entries)
     session.commit()
 
 def main(session, n):
+    print("cleaning database")
+    stmt = "DELETE FROM structure_properties WHERE source='charge_analyzer'"
+    session.execute(stmt)
+    session.commit()
     print("======== ANALYZING AXIAL LIGAND CHARGES ========")
     axial_ligand_analysis(session)
     print("======== ANALYZING METAL CHARGES ========")
@@ -117,6 +189,4 @@ def main(session, n):
 
 
 if __name__ == "__main__":
-    mol = utils.mol_from_smiles("C1=CN([CH]N1*)C")
-    charge = axial_ligand_charge(mol)
-    print(charge)
+    print(electron_configuration(29))

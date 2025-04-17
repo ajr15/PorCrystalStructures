@@ -4,6 +4,7 @@ import numpy as np
 from networkx.algorithms import isomorphism
 from openbabel import openbabel as ob
 import utils
+import config
 from read_to_sql import StructureProperty
 
 BOND_ORDER_DATA = {
@@ -111,35 +112,40 @@ def get_circuit_mol(mol: ob.OBMol, stype: str, idxs) -> ob.OBMol:
     # return mol from circuit idxs
     return submol_from_idxs(mol, circuit)
 
-def mol_entries(sid, path: str, stype: str):
+def mol_entries(sid, path: str, source: str):
     ajr = []
     mol = utils.get_molecule(path)
-    definition_mol = utils.get_molecule(os.path.join("ccdc_data", "definitions", stype + ".mol"))
+    stype = "porphyrins"
+    definition_mol = utils.get_molecule(os.path.join(config.DATA_DIR, "definitions", stype + ".mol"))
     for circuit_name, circuit_idxs in AROMATIC_RING_INFO[stype].items():
         alpha = calc_alpha(submol_from_idxs(definition_mol, circuit_idxs))
         circuit_mol = get_circuit_mol(mol, stype, circuit_idxs)
         homa_dict = calc_homa_properties(circuit_mol, alpha)
         for k, v in homa_dict.items():
-            ajr.append(StructureProperty(structure=sid, source="homa", property="{} {}".format(circuit_name, k), value=v))
+            ajr.append(StructureProperty(structure=sid, source="homa-" + source, property="{} {}".format(circuit_name, k), value=v))
     return ajr
 
-def entries_for_structure(stype: str):
-    data_dir = utils.get_directory("curated", stype)
+def entries_for_structure(data_dir: str):
+    source = os.path.split(data_dir)[-1]
     ajr = []
     for fname in os.listdir(data_dir):
         sid = fname.split("_")[0]
-        ajr += mol_entries(sid, os.path.join(data_dir, fname), stype)
+        ajr += mol_entries(sid, os.path.join(data_dir, fname), source)
     return ajr
 
 def main(session, n):
     print("=" * 10, "CALCULATING HOMA SCORES", "=" * 10)
     if n > 1:
         print("WARNING: you requested more than 1 process for this parser, it cannot be parallelized, so we use 1.")
-    print("reading corrole details...")
-    ajr = entries_for_structure("corroles")
+    print("cleaning database...")
+    # removing all previous readings of HOMA
+    session.execute("DELETE FROM structure_properties WHERE source LIKE 'homa%'")
+    session.commit()
+    print("reading crystal details...")
+    ajr = entries_for_structure(os.path.join(config.DATA_DIR, "xyz", "crystal"))
     session.add_all(ajr)
-    print("reading porphyrin details...")
-    ajr = entries_for_structure("porphyrins")
+    print("reading dft details...")
+    ajr = entries_for_structure(os.path.join(config.DATA_DIR, "xyz", "dft"))
     session.add_all(ajr)
     session.commit()
     print("ALL DONE")

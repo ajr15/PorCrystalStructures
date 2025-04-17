@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+from shutil import copyfile
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 from typing import List
@@ -139,6 +140,7 @@ def main(session: Session, n):
         print("WARNING: you requested more than 1 process for this parser, it cannot be parallelized, so we use 1.")
     update_structure_schema(session)
     orca_out_dir = os.path.join(config.DATA_DIR, "dft")
+    orca_xyz_dir = os.path.join(config.DATA_DIR, "xyz", "dft")
     sids = session.query(Structure.id).all()
     for sid in sids:
         sid = sid[0]
@@ -152,6 +154,8 @@ def main(session: Session, n):
         if finished_normally.value == 1:
             # update details
             session.query(Structure).filter(Structure.id == sid).update({"orca_out": outfile, "orca_xyz": xyzfile})
+            # copy file to ORCA output file dir
+            copyfile(xyzfile, orca_xyz_dir + "/" + sid + "_0.xyz")
     session.commit()
     print("ALL DONE")
 

@@ -22,7 +22,7 @@ def main(session, n: int):
     print("=" * 10, "READING STRUCTURE DETAILS", "=" * 10)
     if n > 1:
         print("WARNING: you requested more than 1 process for this parser, it cannot be parallelized, so we use 1.")
-    path = os.path.join(config.DATA_DIR, "curated_xyz")
+    path = os.path.join(config.DATA_DIR, "xyz", "crystal")
     print("reading structures from", os.path.abspath(path))
     if UPDATE_DB:
         stmt = delete(Structure)

@@ -46,53 +46,75 @@ class ComboFeaturizer (Featurizer):
         
 class StructurePropertyFeaturizer (Featurizer):
 
-    def __init__(self, property_names, property_units, navalue):
+    def __init__(self, property_names, property_units, navalue, property_source=None):
         super().__init__(property_names, navalue)
         self.property_names = property_names
         self.property_units = property_units
+        self.property_source = property_source
 
     def _featurize(self, session, structure_ids) -> np.array:
-        res = []
-        for sid in structure_ids:
-            vec = []
-            for pname, punits in zip(self.property_names, self.property_units):
-                vec.append(self.structure_property(session, sid, pname, punits))
-            res.append(vec)
-        return np.array(res)
+        dfs = []
+        for pname, punits in zip(self.property_names, self.property_units):
+            dfs.append(self.query_to_df(session, pname, punits, self.property_source))
+        ajr = pd.concat(dfs, axis=1, join="outer")
+        # filter to only requested ids - and fill in empty values
+        ajr = ajr.reindex(structure_ids)
+        return ajr.values
 
-    @staticmethod
-    def structure_property(session, sid: int, property: str, units: str):
-        q = session.query(StructureProperty.value).filter(StructureProperty.structure == sid).filter(StructureProperty.property == property)
+    def query_to_df(self, session, pname: str, units: str, source: str) -> pd.DataFrame:
+        # build query
+        q = session.query(StructureProperty.structure, StructureProperty.value).\
+            filter(StructureProperty.property == pname)
         if units is not None:
             q = q.filter(StructureProperty.units == units)
-        v = q.all()
-        if len(v) == 0:
-            return None
-        else:
-            return v[0][0]
+        if source is not None:
+            q = q.filter(StructureProperty.source.like(f"%{source}%"))
+        # run & format
+        ajr = pd.DataFrame(q.all(), columns =["sid", pname])
+        ajr = ajr.set_index('sid')
+        return ajr
+
+    # def _featurize(self, session, structure_ids) -> np.array:
+    #     res = []
+    #     for sid in structure_ids:
+    #         vec = []
+    #         for pname, punits in zip(self.property_names, self.property_units):
+    #             vec.append(self.structure_property(session, sid, pname, punits, self.property_source))
+    #         res.append(vec)
+    #     return np.array(res)
+
+    # @staticmethod
+    # def structure_property(session, sid: int, property: str, units: str, source: str):
+    #     q = session.query(StructureProperty.value).filter(StructureProperty.structure == sid).filter(StructureProperty.property == property)
+    #     if units is not None:
+    #         q = q.filter(StructureProperty.units == units)
+    #     if source is not None:
+    #         q = q.filter(StructureProperty.source.like(f"%{source}%"))
+    #     v = q.all()
+    #     if len(v) == 0:
+    #         return None
+    #     else:
+    #         return v[0][0]
 
 
 class SubstituentPropertyFeaturizer (Featurizer):
 
-    def __init__(self, property_name, property_units, positions, navalue):
+    def __init__(self, property_name, positions, navalue):
         super().__init__(positions, navalue)
         self.property_name = property_name
-        self.property_units = property_units
         self.positions = positions
 
     def _featurize(self, session, structure_ids) -> np.array:
         res = []
         for sid in structure_ids:
-            vec = self.structure_property(session, sid, self.property_name, self.property_units)
+            vec = self.structure_property(session, sid, self.property_name)
             res.append(vec)
         df = pd.DataFrame(res)
         df = df[self.positions]
         return df.values
 
-    def structure_property(self, session, sid: int, prop: str, units: str):
+    def structure_property(self, session, sid: int, prop: str):
         q = session.query(SubstituentProperty.position, SubstituentProperty.position_index, SubstituentProperty.value).filter(SubstituentProperty.structure == sid).filter(SubstituentProperty.property == prop).order_by(SubstituentProperty.position, SubstituentProperty.position_index)
-        if units is not None:
-            q = q.filter(StructureProperty.units == units)
         rows = q.all()
         if len(rows) == 0:
             raise ValueError("The property {} does not exists".format(prop))
@@ -117,3 +139,12 @@ class FunctionFeaturizer (Featurizer):
         res = np.array([self.func(session, sid) for sid in structure_ids])
         return res
         return res.reshape((-1, 1))
+
+if __name__ == "__main__":
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    engine = create_engine("sqlite:///{}".format("../main.db"))
+    session = sessionmaker(bind=engine)()
+    feat = StructurePropertyFeaturizer(["inner_circuit homa", "inner_circuit en"], [None, None], navalue=None, property_source="dft")
+    df = feat.featurize(session, ["ADIQAI", "AKOTUQ", "ALITEU"])
+    print(df)
