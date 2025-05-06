@@ -33,7 +33,7 @@ def compute_dihedral(p1, p2, p3, p4):
 
     x = np.dot(v, w)
     y = np.dot(np.cross(b1, v), w)
-    return np.degrees(np.arctan2(y, x))
+    return abs(np.degrees(np.arctan2(y, x)))
 
 def get_neighbors_dict(obmol: ob.OBMol):
     neighbors = defaultdict(set)
@@ -52,7 +52,8 @@ def calculate_bond_lengths(sid, obmol: ob.OBMol, source) -> List[StructureProper
         j = bond.GetEndAtomIdx()
         p1 = atom_positions[i]
         p2 = atom_positions[j]
-        entries.append(StructureProperty(structure=sid, property=f"bond({i}, {j})", value=compute_bond_length(p1, p2), units="A", source=source))
+        label = "bond({})".format(", ".join(sorted([str(i), str(j)])))
+        entries.append(StructureProperty(structure=sid, property=label, value=compute_bond_length(p1, p2), units="A", source=source))
     return entries
 
 def calculate_bond_angles(sid, obmol: ob.OBMol, source) -> List[StructureProperty]:
@@ -104,18 +105,22 @@ def main(session: Session, n):
     print("=" * 10, "READING STRUCTURE ORCA CALCULATION RESULTS", "=" * 10)
     if n > 1:
         print("WARNING: you requested more than 1 process for this parser, it cannot be parallelized, so we use 1.")
+    # removing all previous readings of HOMA
+    session.execute("DELETE FROM structure_properties WHERE source LIKE 'geometry/%'")
+    session.commit()
     # read only structures with orca_out property (successful calculation)
     structs = session.query(Structure).all()
     entries = []
     for struct in structs:
         print("analyzing", struct.id)
         # analyzing given crystal structure
-        xyz = os.path.join(config.DATA_DIR, "xyz", struct.id + "_0.xyz")
+        xyz = os.path.join(config.DATA_DIR, "xyz", "crystal", struct.id + "_0.xyz")
         if not os.path.isfile(xyz):
+            print(xyz)
             continue
-        entries += analyze_file(xyz, struct.id, source="crystal")
+        entries += analyze_file(xyz, struct.id, source="geometry/crystal")
         if struct.orca_xyz is not None:
-            entries += analyze_file(struct.orca_xyz, struct.id, source="orca")
+            entries += analyze_file(struct.orca_xyz, struct.id, source="geometry/orca")
     print("Writing to DB...")
     session.add_all(entries)
     session.commit()
