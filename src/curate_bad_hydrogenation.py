@@ -1,7 +1,7 @@
 from shutil import copyfile
 import os
 from openbabel import openbabel as ob
-import utils
+from src import utils
 
 
 def is_valid(mol: ob.OBMol) -> bool:

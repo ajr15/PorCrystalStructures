@@ -3,8 +3,7 @@ import os
 from typing import List
 from read_to_sql import Structure, StructureProperty, Substituent, SubstituentProperty
 from sqlalchemy import delete
-import utils
-import config
+from src import utils, config
 
 def read_structures(path: str) -> List[Structure]:
     """read all structures from a given type"""

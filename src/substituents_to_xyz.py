@@ -2,8 +2,7 @@
 import os
 import openbabel as ob
 from sqlalchemy import create_engine
-import utils
-import config
+from src import utils, config
 
 def safe_smiles_str(smiles: str) -> str:
     """Method to encode a smiles string in a safe way for using in ORCA I/O files"""

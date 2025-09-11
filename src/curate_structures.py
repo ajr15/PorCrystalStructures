@@ -9,7 +9,7 @@ from functools import reduce
 import shutil
 from openbabel import openbabel as ob
 import multiprocessing
-import utils
+from src import utils
 
 def topologically_valid(mol: ob.OBMol, structure: str, nisomorphs: int) -> bool:
     """Validate the topology of the complex"""

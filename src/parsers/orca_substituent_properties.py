@@ -2,8 +2,8 @@ import pandas as pd
 import os
 from typing import List
 from sqlalchemy.orm import Session
-from read_to_sql import Substituent, SubstituentProperty
-from parsers.orca_details import Block, file_to_sql, FinishedNormally, read_file_to_blocks
+from src.read_to_sql import Substituent, SubstituentProperty
+from src.parsers.orca_details import Block, file_to_sql, FinishedNormally, read_file_to_blocks
 
 
 def safe_smiles_str(smiles: str) -> str:

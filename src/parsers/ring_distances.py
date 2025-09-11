@@ -2,8 +2,8 @@ import pandas as pd
 from sqlalchemy import text
 from openbabel import openbabel as ob
 import numpy as np
-import utils
-from read_to_sql import SubstituentProperty, Structure
+from src import utils
+from src.read_to_sql import SubstituentProperty, Structure
 
 CONNECTOR_SMILES = {
     "beta": "*C=C*", 

@@ -8,9 +8,9 @@ import numpy as np
 from scipy import stats
 import pandas as pd
 from openbabel import openbabel as ob
-from featurizers import StructurePropertyFeaturizer, SubstituentPropertyFeaturizer, FunctionFeaturizer, Featurizer
-from read_to_sql import Substituent, StructureProperty
-import utils
+from src.featurizers import StructurePropertyFeaturizer, SubstituentPropertyFeaturizer, FunctionFeaturizer, Featurizer
+from src.read_to_sql import Substituent, StructureProperty
+from src import utils
 
 def metal_radius(session, sid: int):
     """Get the VDW radius of the metal center"""

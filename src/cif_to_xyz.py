@@ -5,8 +5,7 @@ from pymatgen.analysis.local_env import JmolNN as AnalyzerNN
 import multiprocessing
 import signal
 from contextlib import contextmanager
-import config
-import utils
+from src import config, utils
 
 class TimeoutException(Exception): pass
 

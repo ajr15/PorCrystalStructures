@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
-from read_to_sql import StructureProperty, SubstituentProperty
+from src.read_to_sql import StructureProperty, SubstituentProperty
 
 class Featurizer (ABC):
 

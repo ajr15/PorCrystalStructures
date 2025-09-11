@@ -3,9 +3,8 @@ import os
 import numpy as np
 from networkx.algorithms import isomorphism
 from openbabel import openbabel as ob
-import utils
-import config
-from read_to_sql import StructureProperty
+from src import utils, config
+from src.read_to_sql import StructureProperty
 
 BOND_ORDER_DATA = {
     "CC": {"R1": 1.467, "R2": 1.349, "c": 0.1702, "ROPT": 1.388},

@@ -15,8 +15,8 @@ from sklearn.utils import resample
 from sklearn.metrics import classification_report
 from sklearn.base import BaseEstimator
 import numpy as np
-from read_to_sql import Structure
-import config
+from src.read_to_sql import Structure
+from src import config
 
 def get_molecule(path: str) -> ob.OBMol:
     """Method to get a molecule by its name"""

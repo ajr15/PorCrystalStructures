@@ -4,8 +4,7 @@ import json
 import re
 from rdkit.Chem import rdchem
 import openbabel as ob
-import config
-import utils
+from src import config, utils
 
 def find_all_structures(keyword: str, output_file: str):
     """Method to fetch all metadata for files with matching keyword (corrole, porphyrin, etc.). outputs the results to JSON file"""
