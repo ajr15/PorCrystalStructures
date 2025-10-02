@@ -3,7 +3,7 @@
 import numpy as np
 from openbabel import openbabel as ob
 import utils
-from read_to_sql import SubstituentProperty, Substituent, Structure
+from src.read_to_sql import SubstituentProperty, Substituent, Structure
 
 PERIODIC_TABLE_BLOCKS = {
     "S": [1, 3, 11, 19, 37, 55, 87],

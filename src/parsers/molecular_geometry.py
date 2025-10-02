@@ -5,8 +5,8 @@ from typing import List
 from sqlalchemy.orm import Session
 import numpy as np
 import openbabel as ob
-from read_to_sql import StructureProperty, Structure
-import config
+from src.read_to_sql import StructureProperty, Structure
+from src import config
 
 
 def get_position(atom: ob.OBAtom):

@@ -4,9 +4,8 @@ from typing import List
 import networkx as nx
 from openbabel import openbabel as ob
 import pandas as pd
-import utils
-import config
-from read_to_sql import Substituent
+from src import config, utils
+from src.read_to_sql import Substituent
 
 def find_substituent(mol: ob.OBMol, substitution_idx: int, macrocycle_idxs: List[int]) -> List[str]:
     """Method to find a substituent's SMILES at a given substituted carbon index. gives the substitution bond as a dummy atom"""

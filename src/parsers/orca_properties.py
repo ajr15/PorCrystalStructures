@@ -2,8 +2,8 @@ import pandas as pd
 import os
 from typing import List
 from sqlalchemy.orm import Session
-from read_to_sql import StructureProperty, Structure
-from parsers.orca_details import Block, file_to_sql, FinishedNormally
+from src.read_to_sql import StructureProperty, Structure
+from src.parsers.orca_details import Block, file_to_sql, FinishedNormally
 
 class MoEnergies (Block):
 

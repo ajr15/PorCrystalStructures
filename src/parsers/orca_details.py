@@ -4,8 +4,8 @@ from shutil import copyfile
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 from typing import List
-from read_to_sql import StructureProperty, Structure
-import config
+from src.read_to_sql import StructureProperty, Structure
+from src import config
 
 class Block:
 

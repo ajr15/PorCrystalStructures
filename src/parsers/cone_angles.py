@@ -3,8 +3,8 @@ from copy import deepcopy
 import numpy as np
 from typing import List
 from openbabel import openbabel as ob
-from read_to_sql import Structure, Substituent, SubstituentProperty
-from utils import get_molecule
+from src.read_to_sql import Structure, Substituent, SubstituentProperty
+from src.utils import get_molecule
 
 def molecule_from_id(session, sid: str) -> ob.OBMol:
     """get an OBMol for a given structure ID"""

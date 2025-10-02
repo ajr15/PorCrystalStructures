@@ -2,9 +2,8 @@
 import os
 from shutil import copyfile
 import json
-import utils
-import config
-from read_to_sql import StructureProperty, Structure
+from src import config
+from src.read_to_sql import StructureProperty, Structure
 
 def json_to_dicts(parameters: dict):
     """Convert Porphystruct JSON results file to list of dict entries"""

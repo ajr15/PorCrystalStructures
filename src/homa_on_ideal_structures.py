@@ -5,8 +5,8 @@ from openbabel import openbabel as ob
 from sklearn.decomposition import PCA
 import numpy as np
 from matplotlib import pyplot as plt
-from parsers.homa_scores import AROMATIC_RING_INFO, calc_alpha, get_circuit_mol, submol_from_idxs, calc_homa_properties
-import utils
+from src.parsers.homa_scores import AROMATIC_RING_INFO, calc_alpha, get_circuit_mol, submol_from_idxs, calc_homa_properties
+from src import utils
 
 
 def get_coords(mol: ob.OBMol, atom_num=None):
