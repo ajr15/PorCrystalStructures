@@ -142,8 +142,9 @@ def main(session: Session, n):
     orca_out_dir = os.path.join(config.DATA_DIR, "dft")
     orca_xyz_dir = os.path.join(config.DATA_DIR, "xyz", "dft")
     sids = session.query(Structure.id).all()
-    for sid in sids:
+    for i, sid in enumerate(sids):
         sid = sid[0]
+        print(sid, "({} out of {})".format(i + 1, len(sids)))
         outdir = os.path.join(orca_out_dir, sid + "_0_out")
         if not os.path.isdir(outdir):
             continue

@@ -106,8 +106,8 @@ def main(session: Session, n):
     ]
     # read properties of each structure
     entries = []
-    for sid, outfile in sids_outfile:
-        print("reading", sid)
+    for i, (sid, outfile) in enumerate(sids_outfile):
+        print("reading", sid, "({} out of {})".format(i + 1, len(sids_outfile)))
         print("reading base calculation")
         entries += file_to_sql(outfile, blocks)
         print("reading multiplicity calculations")
