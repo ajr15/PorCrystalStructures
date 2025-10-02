@@ -7,7 +7,7 @@ import networkx as nx
 from scipy import stats
 from networkx.algorithms import isomorphism
 import os
-import openbabel as ob
+from openbabel import openbabel as ob
 from typing import List
 from sklearn.base import BaseEstimator
 from sklearn.model_selection import train_test_split
@@ -181,6 +181,7 @@ def get_definition(structure: str):
 
 def find_structure_indices(obmol: ob.OBMol, structure: str):
     subgraph = get_definition(structure)
+    obmol.ConnectTheDots()
     g = mol_to_graph(obmol)
     iso = isomorphism.GraphMatcher(g, subgraph, node_match=node_matcher)
     # get non-interceting isomorph counts
