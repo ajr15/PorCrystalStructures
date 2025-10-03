@@ -5,8 +5,9 @@ from typing import List
 from sqlalchemy.orm import Session
 import numpy as np
 import openbabel as ob
-from src.read_to_sql import StructureProperty, Structure
+from src.sqlmodels import StructureProperty, Structure
 from src import config
+from src.parsers.BaseParser import StructureParser
 
 
 def get_position(atom: ob.OBAtom):
@@ -125,3 +126,21 @@ def main(session: Session, n):
     session.add_all(entries)
     session.commit()
     print("ALL DONE")
+
+
+class Parser (StructureParser):
+
+    name = "molecular_geometry_features"
+    source_prefix = "geometry/"
+    
+    def parse_structure(self, session: Session, sid: str) -> tuple:
+        """Parse a single structure (given by structure id), return a tuple of list of sql entries and messages"""
+        # analyzing given crystal structure
+        xyz = os.path.join(config.DATA_DIR, "xyz", "crystal", sid + "_0.xyz")
+        if not os.path.isfile(xyz):
+            return [], ["ERROR: no crystal XYZ file found for " + sid]
+        entries = analyze_file(xyz, sid, source="crystal")
+        orca_xyz = session.query(Structure.orca_xyz).filter(Structure.id == sid).all()[0][0]
+        if orca_xyz is not None:
+            entries += analyze_file(orca_xyz, sid, source="orca")
+        return entries, []

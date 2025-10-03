@@ -3,8 +3,10 @@ from copy import deepcopy
 import numpy as np
 from typing import List
 from openbabel import openbabel as ob
-from src.read_to_sql import Structure, Substituent, SubstituentProperty
+from sqlalchemy.orm import Session
+from src.sqlmodels import Structure, Substituent, SubstituentProperty
 from src.utils import get_molecule
+from src.parsers.BaseParser import StructureParser
 
 def molecule_from_id(session, sid: str) -> ob.OBMol:
     """get an OBMol for a given structure ID"""
@@ -106,7 +108,7 @@ def get_mol_entries(session, sid):
                                         property="cone angle", 
                                         value=angle, 
                                         units="degree", 
-                                        source="calculated", 
+                                        source="", 
                                         structure=sid, 
                                         position=pos, position_index=pos_idx)
             entries.append(entry)
@@ -114,18 +116,43 @@ def get_mol_entries(session, sid):
     return entries
 
 def main(session, n):
-    problematic_sids = []
-    sids = session.query(Structure.id).all()
-    for sid in sids:
-        sid = sid[0]
-        entries = get_mol_entries(session, sid)
-        if len(entries) == 0:
-            problematic_sids.append(sid)
-        session.add_all(entries)
-    session.commit()
-    print("YOU HAVE", len(problematic_sids), "PROBLEMATIC STRUCTURES:")
-    for sid in problematic_sids:
-        print(sid)
+        """Parse the data to SQL entries"""
+        problematic_sids = []
+        sids = session.query(Structure.id).all()
+        for sid in sids:
+            sid = sid[0]
+            entries = get_mol_entries(session, sid)
+            if len(entries) == 0:
+                problematic_sids.append(sid)
+            session.add_all(entries)
+        session.commit()
+        print("YOU HAVE", len(problematic_sids), "PROBLEMATIC STRUCTURES:")
+        for sid in problematic_sids:
+            print(sid)
+
+class Parser (StructureParser):
+
+    name = "cone_angles_calculator"
+    source_prefix = "cone_angles"
+
+    def parse_structure(self, session: Session, sid: str):
+        positions = ["meso", "beta", "axial"]
+        entries = []
+        for pos in positions:
+            for points, radii, pos_idx, origin, origin_radius, smiles in get_ligands(session, sid, pos):
+                if origin is None:
+                    return [], ["ERROR: null origin atom at " + sid]
+                angle = cone_angle(points, radii, origin, origin_radius)
+                entry = SubstituentProperty(smiles=smiles, 
+                                            property="cone angle", 
+                                            value=angle, 
+                                            units="degree", 
+                                            source="", 
+                                            structure=sid, 
+                                            position=pos, position_index=pos_idx)
+                entries.append(entry)
+        
+        return entries, [] if len(entries) > 0 else ["WARNING: no entries for " + sid]
 
 
 if __name__ == "__main__":

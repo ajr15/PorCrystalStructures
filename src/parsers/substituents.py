@@ -3,9 +3,11 @@ import os
 from typing import List
 import networkx as nx
 from openbabel import openbabel as ob
+from sqlalchemy import delete
 import pandas as pd
 from src import config, utils
-from src.read_to_sql import Substituent
+from src.sqlmodels import Substituent
+from src.parsers.BaseParser import BaseParser, Session
 
 def find_substituent(mol: ob.OBMol, substitution_idx: int, macrocycle_idxs: List[int]) -> List[str]:
     """Method to find a substituent's SMILES at a given substituted carbon index. gives the substitution bond as a dummy atom"""
@@ -105,3 +107,25 @@ def main(session, n):
     session.add_all(ajr)
     session.commit()
     print("ALL DONE")
+
+class Parser (BaseParser):
+
+    name = "substituents"
+    source_prefix = ""
+
+    def parse(self, session: Session, n: int):
+        """Parse the data to SQL entries"""
+        ajr = []
+        moldir = os.path.join(config.DATA_DIR, "xyz", "crystal")
+        fnames = list(os.listdir(moldir))
+        for i, fname in enumerate(fnames):
+            sid = fname.split("_")[0]
+            print("analyzing", sid, f"({i + 1} out of {len(fnames)})")
+            mol = utils.get_molecule(os.path.join(moldir, fname))
+            ajr += mol_to_entries(mol, "porphyrins", sid)
+        return ajr
+    
+    def delete(self, session: Session):
+        stmt = delete(Substituent)
+        session.execute(stmt)
+

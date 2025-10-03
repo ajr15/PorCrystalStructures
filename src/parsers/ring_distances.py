@@ -3,7 +3,8 @@ from sqlalchemy import text
 from openbabel import openbabel as ob
 import numpy as np
 from src import utils
-from src.read_to_sql import SubstituentProperty, Structure
+from src.sqlmodels import SubstituentProperty, Structure
+from src.parsers.BaseParser import StructureParser, Session
 
 CONNECTOR_SMILES = {
     "beta": "*C=C*", 
@@ -157,7 +158,7 @@ def sid_to_entries(session, stype, sid):
                 property="{} nn dist".format(k),
                 value=v,
                 units="A",
-                source="calculated",
+                source="",
                 structure=sid,
                 position=pos1[:-1],
                 position_index=int(pos1[-1])
@@ -165,27 +166,38 @@ def sid_to_entries(session, stype, sid):
             entries.append(entry)
     return entries
 
-def entries_for_structure(session, stype: str):
-    sids = session.query(Structure.id).filter(Structure.type == stype).all()
-    res = []
-    for i, sid in enumerate(sids):
-        sid = sid[0]
-        print(i + 1, "out of", len(sids))
-        res += sid_to_entries(session, stype, sid)
-    return res
+class Parser (StructureParser):
 
-def main(session, n):
-    print("=" * 10, "CALCULATING RING DISTANCES", "=" * 10)
-    if n > 1:
-        print("WARNING: you requested more than 1 process for this parser, it cannot be parallelized, so we use 1.")
-    print("reading porphyrin details...")
-    ajr = entries_for_structure(session, "porphyrin")
-    session.add_all(ajr)
-    print("reading corroles details...")
-    ajr = entries_for_structure(session, "corrole")
-    session.add_all(ajr)
-    session.commit()
-    print("ALL DONE")
+    name = "ring_distances"
+    source_prefix = "ring_distances"
+
+    def parse_structure(self, session: Session, sid: str) -> tuple:
+        """Parse a single structure (given by structure id), return a tuple of list of sql entries and messages"""
+        return sid_to_entries(session, "porphyrin", sid), []
+
+
+
+# def entries_for_structure(session, stype: str):
+#     sids = session.query(Structure.id).filter(Structure.type == stype).all()
+#     res = []
+#     for i, sid in enumerate(sids):
+#         sid = sid[0]
+#         print(i + 1, "out of", len(sids))
+#         res += sid_to_entries(session, stype, sid)
+#     return res
+
+# def main(session, n):
+#     print("=" * 10, "CALCULATING RING DISTANCES", "=" * 10)
+#     if n > 1:
+#         print("WARNING: you requested more than 1 process for this parser, it cannot be parallelized, so we use 1.")
+#     print("reading porphyrin details...")
+#     ajr = entries_for_structure(session, "porphyrin")
+#     session.add_all(ajr)
+#     print("reading corroles details...")
+#     ajr = entries_for_structure(session, "corrole")
+#     session.add_all(ajr)
+#     session.commit()
+#     print("ALL DONE")
 
 def test():
     smiles1 = "*[H]"

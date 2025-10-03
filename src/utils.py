@@ -15,7 +15,7 @@ from sklearn.utils import resample
 from sklearn.metrics import classification_report
 from sklearn.base import BaseEstimator
 import numpy as np
-from src.read_to_sql import Structure
+from src.sqlmodels import Structure
 from src import config
 
 def get_molecule(path: str) -> ob.OBMol:

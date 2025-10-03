@@ -2,8 +2,10 @@
 # first, analyze the charges of the axial ligands and then analyze metal charges
 import numpy as np
 from openbabel import openbabel as ob
-import utils
-from src.read_to_sql import SubstituentProperty, Substituent, Structure
+from sqlalchemy.orm import Session
+from src.sqlmodels import SubstituentProperty, Substituent, Structure
+from src.parsers.BaseParser import StructureParser
+from src import utils
 
 PERIODIC_TABLE_BLOCKS = {
     "S": [1, 3, 11, 19, 37, 55, 87],
@@ -88,8 +90,7 @@ def axial_ligand_analysis(session):
         ligand = ligand[0]
         mol = utils.mol_from_smiles(ligand)
         charge = axial_ligand_charge(mol)
-        entry = SubstituentProperty(smiles=ligand, property="charge", value=charge, source="charge_analyzer")
-        print(ligand, charge)
+        entry = SubstituentProperty(smiles=ligand, property="charge", value=charge, source="charge_analyzer") # IMPORTANT: give the full source here, otherwise it will not clear database properly
         entries.append(entry)
     session.add_all(entries)
     session.commit()
@@ -167,12 +168,12 @@ def metal_charge_analysis(session):
         z = ob.GetAtomicNum(smiles[1:-1])
         configuration = ionized_configuration(z, metal_charge)
         print(smiles, metal_charge, configuration)
-        entries.append(SubstituentProperty(smiles=smiles, property="charge", value=metal_charge, source="charge_analyzer", structure=sid))
-        entries.append(SubstituentProperty(smiles=smiles, property="p_population", value=configuration[-1], source="charge_analyzer", structure=sid))
-        entries.append(SubstituentProperty(smiles=smiles, property="s_population", value=configuration[-2], source="charge_analyzer", structure=sid))
-        entries.append(SubstituentProperty(smiles=smiles, property="d_population", value=configuration[-3], source="charge_analyzer", structure=sid))
-        entries.append(SubstituentProperty(smiles=smiles, property="f_population", value=configuration[-4], source="charge_analyzer", structure=sid))
-        entries.append(SubstituentProperty(smiles=smiles, property="valence_level", value=configuration[-5], source="charge_analyzer", structure=sid))
+        entries.append(SubstituentProperty(smiles=smiles, property="charge", value=metal_charge, source="", structure=sid))
+        entries.append(SubstituentProperty(smiles=smiles, property="p_population", value=configuration[-1], source="", structure=sid))
+        entries.append(SubstituentProperty(smiles=smiles, property="s_population", value=configuration[-2], source="", structure=sid))
+        entries.append(SubstituentProperty(smiles=smiles, property="d_population", value=configuration[-3], source="", structure=sid))
+        entries.append(SubstituentProperty(smiles=smiles, property="f_population", value=configuration[-4], source="", structure=sid))
+        entries.append(SubstituentProperty(smiles=smiles, property="valence_level", value=configuration[-5], source="", structure=sid))
 
     session.add_all(entries)
     session.commit()
@@ -186,6 +187,36 @@ def main(session, n):
     axial_ligand_analysis(session)
     print("======== ANALYZING METAL CHARGES ========")
     metal_charge_analysis(session)
+
+class Parser (StructureParser):
+
+    name = "charge_analyzer"
+    source_prefix = "charge_analyzer"
+
+    def parse_structure(self, session: Session, sid: int):
+        base_c = -2
+        axial_c = get_axial_charge(session, sid)
+        metal_charge = - (base_c + axial_c)
+        smiles = get_metal(session, sid)
+        z = ob.GetAtomicNum(smiles[1:-1])
+        configuration = ionized_configuration(z, metal_charge)
+        return [
+            SubstituentProperty(smiles=smiles, property="charge", value=metal_charge, source="", structure=sid),
+            SubstituentProperty(smiles=smiles, property="p_population", value=configuration[-1], source="", structure=sid),
+            SubstituentProperty(smiles=smiles, property="s_population", value=configuration[-2], source="", structure=sid),
+            SubstituentProperty(smiles=smiles, property="d_population", value=configuration[-3], source="", structure=sid),
+            SubstituentProperty(smiles=smiles, property="f_population", value=configuration[-4], source="", structure=sid),
+            SubstituentProperty(smiles=smiles, property="valence_level", value=configuration[-5], source="", structure=sid)
+        ], []
+
+    def parse(self, session: Session, n: int):
+        # add the axial ligand analysis before the structure-based analysis
+        print("analyzing ligand charges...")
+        axial_ligand_analysis(session)
+        # normally run structure analysis
+        print("analyzing metal charges...")
+        return super().parse(session, n)
+
 
 
 if __name__ == "__main__":
