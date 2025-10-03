@@ -14,3 +14,5 @@ data
 # igrore model results directories
 models/
 results/
+# ignore database
+main.db
