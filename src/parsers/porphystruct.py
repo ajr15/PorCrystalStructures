@@ -86,7 +86,7 @@ class Parser (StructureParser):
 
     def parse_structure(self, session: Session, sid: str):
         """Parse the data to SQL entries"""
-        ajr = entries_for_structure(sid, "crystal")
-        ajr += entries_for_structure(sid, "dft")
-        return ajr
+        entries, msgs = entries_for_structure(sid, "crystal")
+        dftentries, dftmsgs = entries_for_structure(sid, "dft")
+        return entries + dftentries, msgs + dftmsgs
 

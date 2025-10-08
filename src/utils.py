@@ -14,8 +14,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils import resample
 from sklearn.metrics import classification_report
 from sklearn.base import BaseEstimator
+from sqlalchemy.orm import Session
+from typing import List
 import numpy as np
-from src.sqlmodels import Structure
+from src.sqlmodels import Structure, StructureProperty
+from src.featurizers import StructurePropertyFeaturizer
 from src import config
 
 def get_molecule(path: str) -> ob.OBMol:
@@ -230,8 +233,6 @@ def sids_by_type(session, stype: str="all"):
         raise ValueError("Unknown structure type ({}). allowed values are 'corrole', 'porphyrin' or 'all'".format(stype))
     ajr = q.distinct().all()
     return [x[0] for x in ajr]
-
-
 
 # ML related utils
 

@@ -74,28 +74,6 @@ class StructurePropertyFeaturizer (Featurizer):
         ajr = ajr.set_index('sid')
         return ajr
 
-    # def _featurize(self, session, structure_ids) -> np.array:
-    #     res = []
-    #     for sid in structure_ids:
-    #         vec = []
-    #         for pname, punits in zip(self.property_names, self.property_units):
-    #             vec.append(self.structure_property(session, sid, pname, punits, self.property_source))
-    #         res.append(vec)
-    #     return np.array(res)
-
-    # @staticmethod
-    # def structure_property(session, sid: int, property: str, units: str, source: str):
-    #     q = session.query(StructureProperty.value).filter(StructureProperty.structure == sid).filter(StructureProperty.property == property)
-    #     if units is not None:
-    #         q = q.filter(StructureProperty.units == units)
-    #     if source is not None:
-    #         q = q.filter(StructureProperty.source.like(f"%{source}%"))
-    #     v = q.all()
-    #     if len(v) == 0:
-    #         return None
-    #     else:
-    #         return v[0][0]
-
 
 class SubstituentPropertyFeaturizer (Featurizer):
 
@@ -138,7 +116,7 @@ class FunctionFeaturizer (Featurizer):
     def _featurize(self, session, structure_ids) -> np.array:
         res = np.array([self.func(session, sid) for sid in structure_ids])
         return res
-        return res.reshape((-1, 1))
+
 
 if __name__ == "__main__":
     from sqlalchemy import create_engine

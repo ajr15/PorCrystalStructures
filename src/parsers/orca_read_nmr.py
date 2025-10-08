@@ -166,12 +166,14 @@ class Parser (StructureParser):
             # if the atom is a dummy atom, it gets slightly different output 
             if atomindex in atom_labels:
                 label = atom_labels[atomindex]
-                entries.append(StructureProperty(structure=sid, property=label + "/zz", value=nics_zz[atomindex], units="ppm", source="nics"))
+                source = "nics"
+                entries.append(StructureProperty(structure=sid, property=label + "/zz", value=nics_zz[atomindex], units="ppm", source=source))
             else:
                 symbol = ob.GetSymbol(atom.GetAtomicNum())
                 label = f"{symbol}{atomindex}"
-            entries.append(StructureProperty(structure=sid, property=label + "/isotropic", value=shielding_df.loc[atomindex, "isotropic"], units="ppm", source="shielding"))
-            entries.append(StructureProperty(structure=sid, property=label + "/anisotropic", value=shielding_df.loc[atomindex, "anisotropic"], units="ppm", source="shielding"))
+                source = "shielding"
+            entries.append(StructureProperty(structure=sid, property=label + "/isotropic", value=shielding_df.loc[atomindex, "isotropic"], units="ppm", source=source))
+            entries.append(StructureProperty(structure=sid, property=label + "/anisotropic", value=shielding_df.loc[atomindex, "anisotropic"], units="ppm", source=source))
         return entries, [] if len(atom_labels) == 17 * 4 else ["WARNING: Didn't find all probes for " + sid]
 
 if __name__ == "__main__":
