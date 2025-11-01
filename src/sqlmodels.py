@@ -20,15 +20,23 @@ class Structure (SqlBase):
     orca_out = Column(String)
     orca_xyz = Column(String)
 
-
 class Substituent (SqlBase):
-
-    """Details on the substituents of a given macrocycle. a relationship table specifying relation between the substituents table and the details table"""
 
     __tablename__ = "substituents"
     id = Column(Integer, primary_key=True)
+    smiles = Column(String)
+    connected_atom = Column(Integer)
+    xyz_with_h = Column(String)
+    xyz_no_h = Column(String)
+
+class StructureSubstituents (SqlBase):
+
+    """Details on the substituents of a given macrocycle. a relationship table specifying relation between the substituents table and the details table"""
+
+    __tablename__ = "structure_substituents"
+    id = Column(Integer, primary_key=True)
     structure = Column(String, ForeignKey("structures.id"))
-    substituent = Column(String)
+    substituent = Column(Integer, ForeignKey("substituents.id"))
     position = Column(String) # metal, meso, beta or axial
     position_index = Column(Integer) # to specify index of each substituent (e.g. meta1, beta4...)
     atom_indicis = Column(String) # to specify the atomic indices of the substituent's atoms in the parent molecule (for easy future reference)
@@ -40,7 +48,7 @@ class SubstituentProperty (SqlBase):
 
     __tablename__ = "substituents_properties"
     id = Column(Integer, primary_key=True)
-    smiles = Column(String)
+    substituent = Column(Integer, ForeignKey("substituents.id"))
     property = Column(String)
     value = Column(Float)
     units = Column(String)

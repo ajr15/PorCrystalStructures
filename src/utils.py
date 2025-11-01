@@ -1,3 +1,4 @@
+import re
 import joblib
 import json
 import matplotlib.pyplot as plt
@@ -14,11 +15,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils import resample
 from sklearn.metrics import classification_report
 from sklearn.base import BaseEstimator
-from sqlalchemy.orm import Session
 from typing import List
 import numpy as np
-from src.sqlmodels import Structure, StructureProperty
-from src.featurizers import StructurePropertyFeaturizer
+from src.sqlmodels import Structure
 from src import config
 
 def get_molecule(path: str) -> ob.OBMol:
@@ -185,6 +184,8 @@ def get_definition(structure: str):
 def find_structure_indices(obmol: ob.OBMol, structure: str):
     subgraph = get_definition(structure)
     obmol.ConnectTheDots()
+    obmol.AddHydrogens()
+    obmol.PerceiveBondOrders()
     g = mol_to_graph(obmol)
     iso = isomorphism.GraphMatcher(g, subgraph, node_match=node_matcher)
     # get non-interceting isomorph counts
@@ -321,11 +322,15 @@ def calc_r_squared(pred, true) -> float:
 
 
 def estimate_regression_fit(pred, true, prefix="") -> dict:
+    if len(pred.shape) > 1:
+        pred = pred.flatten()
+    if len(true.shape) > 1:
+        true = true.flatten()
     return {
-        prefix + "rmse": calc_rmse(pred, true)[0],
-        prefix + "mae": calc_mae(pred, true)[0],
-        prefix + "mare": calc_mare(pred, true)[0],
-        prefix + "r_squared": calc_r_squared(pred, true)[0]
+        prefix + "rmse": calc_rmse(pred, true),
+        prefix + "mae": calc_mae(pred, true),
+        prefix + "mare": calc_mare(pred, true),
+        prefix + "r_squared": calc_r_squared(pred, true)
     }
 
 def estimate_classification_fit(pred, true, prefix="") -> dict:
@@ -392,6 +397,38 @@ def analyze_bootstrap(df: pd.DataFrame, ci_alpha=0.025):
     avg["ci"] = ci
     return avg
 
+
+def read_raw_performance_results(models_dir: str):
+    """Read raw results as dataframe with [metal features, macro features, axial features, target, bootstrap_id, **performance metrics] as columns"""
+    results = []
+    pattern = r"metal=(.*?)_macro=(.*?)_axial=(.*?)_target=(.*)"
+
+    for subdir in os.listdir(models_dir):
+        match = re.match(pattern, subdir)
+        if not match:
+            continue
+        metal, macro, axial, target = match.groups()
+        subdir_path = os.path.join(models_dir, subdir)
+
+        for bootstrap_id in os.listdir(subdir_path):
+            bootstrap_path = os.path.join(subdir_path, bootstrap_id)
+            metrics_path = os.path.join(bootstrap_path, "metrics.json")
+
+            if os.path.isfile(metrics_path):
+                with open(metrics_path, "r") as f:
+                    metrics = json.load(f)
+                metrics.update({
+                    "metal": metal,
+                    "macro": macro,
+                    "axial": axial,
+                    "target": target,
+                    "bootstrap_id": bootstrap_id
+                })
+                results.append(metrics)
+
+    return pd.DataFrame(results)
+
+
 def read_performance_resutls(display_metric: str, display_targets: List[str], display_features: List[str], models_dir: str, ci_alpha: float):
     data = {x: {} for x in display_features}
     for target in display_targets:
@@ -438,3 +475,8 @@ def define_pallet():
 
     # Define custom fonts
     plt.rcParams['font.size'] = 14
+
+if __name__ == "__main__":
+    import config
+    df = read_raw_performance_results(os.path.join(config.PROJECT_SRC_DIR, "models"))
+    print(df)

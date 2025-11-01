@@ -15,4 +15,4 @@ data
 models/
 results/
 # ignore database
-main.db
+./main.db

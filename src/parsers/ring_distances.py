@@ -3,7 +3,7 @@ from sqlalchemy import text
 from openbabel import openbabel as ob
 import numpy as np
 from src import utils
-from src.sqlmodels import SubstituentProperty, Structure
+from src.sqlmodels import SubstituentProperty, Structure, Substituent
 from src.parsers.BaseParser import StructureParser, Session
 
 CONNECTOR_SMILES = {
@@ -138,23 +138,35 @@ def measure_distance(smiles1, smiles2, position, force_field: str="UFF", n_steps
                     min_dist[k] = dist
     return min_dist
 
+def xyz_to_smiles(xyz, connected_atom):
+    mol = utils.get_molecule(xyz)
+    dummy_atom = mol.NewAtom()
+    dummy_atom.SetAtomicNum(0)  # Set atomic number to 0 for a dummy atom
+    connected = mol.GetAtom(connected_atom)
+    mol.AddBond(connected.GetIdx(), dummy_atom.GetIdx(), 1)  # Add a single bond
+    return utils.mol_to_smiles(mol)
+
 def sid_to_entries(session, stype, sid):
     q = "SELECT substituent, position || position_index AS pos FROM " +\
-        "substituents WHERE (position=\"beta\" OR position=\"meta\" OR position=\"meso\") AND structure=\"{}\"".format(sid)
+        "structure_substituents WHERE (position=\"beta\" OR position=\"meta\" OR position=\"meso\") AND structure=\"{}\"".format(sid)
     data = session.execute(text(q))
-    df = pd.DataFrame(data, columns=["smiles", "position"])
+    df = pd.DataFrame(data, columns=["subid", "position"])
+    df["xyz"] = [session.query(Substituent.xyz_no_h).filter(Substituent.id == subid).first()[0] for subid in df["subid"]]
+    df["connected_atom"] = [session.query(Substituent.connected_atom).filter(Substituent.id == subid).first()[0] for subid in df["subid"]]
+    df["smiles"] = [xyz_to_smiles(xyz, atom) for xyz, atom in df[["xyz", "connected_atom"]].values]
     df = df.set_index("position")
     entries = []
     for pos1, pos2 in DISTANCES[stype]:
         # getting substituents smiles
         smi1 = df.loc[pos1, "smiles"]
+        subid = df.loc[pos1, "subid"]
         smi2 = df.loc[pos2, "smiles"]
         # choosing meso or beta
         connector = "meso" if any(["meso" in pos1, "meso" in pos2]) else "beta"
         dist_dict = measure_distance(smi1, smi2, connector)
         for k, v in dist_dict.items():
             entry = SubstituentProperty(
-                smiles=smi1,
+                substituent=subid,
                 property="{} nn dist".format(k),
                 value=v,
                 units="A",
@@ -244,11 +256,13 @@ def test():
 
 
 if __name__ == "__main__":
-    test()
-    exit()
-    # connect to the databse
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
-    engine = create_engine("sqlite:///{}".format("main.db"))
-    session = sessionmaker(bind=engine)()
-    x = entries_for_structure(session, "corrole")
+    import os
+    from src import config
+    engine = create_engine("sqlite:///" + os.path.join(config.PROJECT_SRC_DIR, "main.db"))
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    p = Parser()
+    p.parse_structure(session, "ADIQAI")
+    

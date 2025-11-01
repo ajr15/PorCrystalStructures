@@ -37,7 +37,7 @@ def run_parser(parser_name, db_path, nworkers, clear_db):
     SqlBase.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
     # run the parsing function
-    parser = fetch_parser(parser_name, raise_error=False)
+    parser = fetch_parser(parser_name, raise_error=True)
     parser.execute(session, nworkers, clear_db)
     
 

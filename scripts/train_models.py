@@ -1,191 +1,199 @@
+from multiprocessing import Pool
+from tqdm import tqdm
+import json
 import random
 import os
-from functools import reduce
-import matplotlib.pyplot as plt
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-from sklearn.model_selection import train_test_split
+from itertools import product
+import shap
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split, KFold
 import numpy as np
-from scipy import stats
 import pandas as pd
 from openbabel import openbabel as ob
-from src.featurizers import StructurePropertyFeaturizer, SubstituentPropertyFeaturizer, FunctionFeaturizer, Featurizer
-from src.sqlmodels import Substituent, StructureProperty
+from sqlalchemy.orm import Session
+from src.featurizers import SubstituentPropertyFeaturizer, FunctionFeaturizer, SymmetryAwareFeaturizer
+from src.sqlmodels import Substituent, StructureSubstituents, SubstituentProperty
 from src import utils
 
-def metal_radius(session, sid: int):
+
+MESO_POSITIONS = [f"meso{i + 1}" for i in range(4)]
+BETA_POSITIONS = [f"beta{i + 1}" for i in range(8)]
+AXIAL_POSITIONS = [f"axial{i + 1}" for i in range(2)]
+
+def substituent_featurizer(positions, property_name: str, navalue, with_h: bool, symmetry: str=None, prefix: str=""):
+    source = "orca_substituent_property/with_h" if with_h else "orca_substituent_property/no_h"
+    feat = SubstituentPropertyFeaturizer(property_name, positions, navalue=navalue, source=source, prefix=prefix)
+    if symmetry is not None:
+        feat.prefix = ""
+        feat = SymmetryAwareFeaturizer(feat, symmetry, prefix=prefix, add_sum=True)
+    return feat
+
+def featurize_metal(session: Session, sid: str):
     """Get the VDW radius of the metal center"""
-    metal = session.query(Substituent.substituent).filter(Substituent.structure == sid).filter(Substituent.position == "metal").all()[0][0]
-    metal = utils.mol_from_smiles(metal).GetAtom(1)
-    return ob.GetVdwRad(metal.GetAtomicNum())
+    # Get the substituent id for the metal position
+    metal_sub = session.query(StructureSubstituents.substituent).filter(
+        StructureSubstituents.structure == sid,
+        StructureSubstituents.position == "metal"
+    ).scalar()
+    # Get the SMILES string for the metal substituent
+    metal_smiles = session.query(Substituent.smiles).filter(Substituent.id == metal_sub).scalar()
+    metal = utils.mol_from_smiles(metal_smiles).GetAtom(1)
+    metal_charge = session.query(SubstituentProperty.value).filter(SubstituentProperty.structure == sid).filter(SubstituentProperty.property == "charge").first()[0]
+    d_population = session.query(SubstituentProperty.value).filter(SubstituentProperty.structure == sid).filter(SubstituentProperty.property == "d_population").first()[0]
+    # get the coordination number
+    coord = 6 - session.query(StructureSubstituents).filter(StructureSubstituents.structure == sid, StructureSubstituents.position == "axial").count()
+    return [coord, metal.GetAtomicNum(), metal_charge, d_population]
 
-def _non_planarity_helper(session, sid, mode, units):
-    v = session.query(StructureProperty.value).filter(StructureProperty.structure == sid).filter(StructureProperty.property == mode).filter(StructureProperty.units == units).all()
-    return abs(v[0][0])
+def target_featurizer(session: Session, sid: str):
+    props_df = pd.read_sql(f"SELECT property,source,value FROM structure_properties WHERE structure='{sid}' AND source LIKE 'parser%'", session.connection())
+    props_df = props_df.pivot_table(index=["property", "source"], values="value", aggfunc="first").unstack("source")
+    props_df.columns = ["{}".format(col[1].split("/")[-1]) for col in props_df.columns]
+    if any([col not in props_df.columns for col in ["S1", "S3", "S5"]]):
+        return [None, None, None, None]
+    props_df = props_df[["S1", "S3", "S5"]]
+    spin_state = props_df.loc["final_energy", :].idxmin()
+    energies = props_df.loc["final_energy", :].sort_values(ascending=True)
+    spin_shift = (energies.values[1] - energies.values[0]) * 27.2114 # convert to eV from Ha
+    return [
+        props_df.loc["HOMO-0_energy", spin_state], 
+        props_df.loc["LUMO+0_energy", spin_state], 
+        props_df.loc["HOMO-LUMO_gap", spin_state],
+        spin_shift
+    ]
 
-def non_planarity(mode, units):
-    s = mode if "total" in mode else mode + " non planarity"
-    return lambda session, sid: _non_planarity_helper(session, sid, s, units)
+TARGET_FEATURIZER = FunctionFeaturizer(["HOMO", "LUMO", "gap", "spin_shift"], target_featurizer, navalue=None)
+BASE_METAL_FEATURIZER = FunctionFeaturizer(["coordination", "z", "charge", "d_population"], featurize_metal, navalue=None)
 
-def _dominant_mode_helper(session, sid, th, mode):
-    structprops = session.query(StructureProperty).\
-                filter(StructureProperty.structure == sid).\
-                filter(StructureProperty.property.contains("non planarity")).\
-                filter(StructureProperty.units == "%").all()
-    total_np = _non_planarity_helper(session, sid, "total out of plane (exp)", "A")
-    max_mode = structprops[0]
-    for sp in structprops[1:]:
-        if max_mode.value < sp.value:
-            max_mode = sp
-    if total_np >= th:
-        return max_mode.property.split()[0] == mode
-    else:
-        return False
-
-def dominant_mode(mode: str, th: float=1):
-    """featurizer to check the dominant mode of a molecule"""
-    return lambda session, sid: _dominant_mode_helper(session, sid, th, mode)
-
-MACROCYCLE_POSITIONS = ["meso1", "beta1", "beta2", "meso2", "beta3", "beta4", "meso3", "beta5", "beta6", "meso4", "beta7", "beta8"]
-MACROCYCLE_POSITIONS = [MACROCYCLE_POSITIONS[(3 * i):] + MACROCYCLE_POSITIONS[:(3 * i)] for i in range(4)]
-AXIAL_POSITIONS = [["axial1", "axial2"], ["axial2", "axial1"]]
-STYPE = "porphyrin"
-
-def reduced_distances_helper(pname, session, sid):
-    feat = SubstituentPropertyFeaturizer(pname, MACROCYCLE_POSITIONS[0], navalue=None)
-    df = feat.featurize(session, [sid])
-    df["beta-beta"] = np.mean(df[["beta1", "beta3", "beta5", "beta7"]].values)
-    df["beta-meso"] = np.mean(df[["meso" + str(i + 1) for i in range(4)] + ["beta2", "beta4", "beta6", "beta8"]].values)
-    return df[["beta-beta", "beta-meso"]].values.tolist()[0]
-
-def reduced_distances(pname):
-    return lambda session, sid: reduced_distances_helper(pname, session, sid)
-
-def reduced_cone_angles(session, sid):
-    feat = SubstituentPropertyFeaturizer("cone angle", MACROCYCLE_POSITIONS[0], navalue=-1)
-    df = feat.featurize(session, [sid])
-    df["beta"] = np.mean(df[[c for c in df.columns if "beta" in c]].values)
-    df["meso"] = np.mean(df[[c for c in df.columns if "meso" in c]].values)
-    return df[["beta", "meso"]].values.tolist()[0]
-
-def axial_features(session, sid):
-    feat = SubstituentPropertyFeaturizer("cone angle", AXIAL_POSITIONS[0], navalue=-1)
-    df = feat.featurize(session, [sid])
-    empty_spots = np.sum(df.eq(-1).values)
-    axial_angles = df[~df.eq(-1)].dropna(axis=1).values[0]
-    mean_angle = np.mean(axial_angles) if len(axial_angles) > 0 else None
-    return [6 - empty_spots, mean_angle]
-
-def avg_pyrrole_homa(session, sid):
-    props = ['pyrrole1 homa', 'pyrrole2 homa', 'pyrrole3 homa', 'pyrrole4 homa']
-    units = [None for _ in range(len(props))]
-    feat = StructurePropertyFeaturizer(props, units, navalue=None)
-    return np.mean(feat.featurize(session, [sid]).values)
-
-def mixed_angle_distance(session, sid):
-    feat = SubstituentPropertyFeaturizer("covalent nn dist", MACROCYCLE_POSITIONS[0], navalue=None) +\
-            SubstituentPropertyFeaturizer("cone angle", MACROCYCLE_POSITIONS[0], navalue=-1)
-    return feat.featurize(session, [sid]).values
-
-
-MEATL_AXIAL_FEATURES = FunctionFeaturizer(["coordination", "axial_angle"], axial_features, -1) + FunctionFeaturizer("metal_radius", metal_radius, navalue=None)
-
-FEATURIZERS = {
-    "cone_angles": SubstituentPropertyFeaturizer("cone angle", MACROCYCLE_POSITIONS[0], navalue=-1) + MEATL_AXIAL_FEATURES,
-    "vdw_distances": SubstituentPropertyFeaturizer("vdw nn dist", MACROCYCLE_POSITIONS[0], navalue=None) + MEATL_AXIAL_FEATURES,
-    "covalent_distances": SubstituentPropertyFeaturizer("covalent nn dist", MACROCYCLE_POSITIONS[0], navalue=None) + MEATL_AXIAL_FEATURES,
-    "nn_distances": SubstituentPropertyFeaturizer("None nn dist", MACROCYCLE_POSITIONS[0], navalue=None) + MEATL_AXIAL_FEATURES,
-    "reduced_vdw_distances": FunctionFeaturizer(["beta-beta", "beta-meso"], reduced_distances("vdw nn dist"), None) + MEATL_AXIAL_FEATURES,
-    "reduced_cone_angles": FunctionFeaturizer(["beta_angle", "meso_angle"], reduced_cone_angles, None) + MEATL_AXIAL_FEATURES,
-    "angles_and_distances": FunctionFeaturizer(["beta_angle", "meso_angle"], reduced_cone_angles, None) + FunctionFeaturizer(["beta-beta", "beta-meso"], reduced_distances("vdw nn dist"), None) + MEATL_AXIAL_FEATURES,
+METAL_FEATURIZERS = {
+    "base": BASE_METAL_FEATURIZER
 }
 
+AXIAL_FEATURIZERS = {
+    pname: substituent_featurizer(AXIAL_POSITIONS, pname, navalue=0, with_h=False, symmetry="axial", prefix="axial_")
+    for pname in ["connected_atom_mulliken", "connected_atom_loewdin"]
+}
+AXIAL_FEATURIZERS["homo_lumo"] = substituent_featurizer(AXIAL_POSITIONS, "HOMO", navalue=0, with_h=False, symmetry="axial", prefix="axial_homo_") +\
+    substituent_featurizer(AXIAL_POSITIONS, "LUMO", navalue=0, with_h=False, symmetry="axial", prefix="axial_lumo_")
 
-
-REGRESSION_TARGETS = {
-    # "outer_homa": StructurePropertyFeaturizer(["outer_circuit homa"], [None], navalue=None),
-    "inner_homa": StructurePropertyFeaturizer(["inner_circuit homa"], [None], navalue=None),
-    "pyrrole_homa": FunctionFeaturizer("pyrrole homa", avg_pyrrole_homa, navalue=None),
-    "total_out_of_plane": FunctionFeaturizer("total out of plane", non_planarity("total out of plane (exp)", "A"), navalue=None),
-    "abs_ruffling": FunctionFeaturizer("abs. ruffling", non_planarity("ruffling", "A"), navalue=None),
-    "abs_saddling": FunctionFeaturizer("abs. saddling", non_planarity("saddling", "A"), navalue=None),
-    "abs_doming": FunctionFeaturizer("abs. doming", non_planarity("doming", "A"), navalue=None),
+MACROCYCLE_FEATURIZERS = {
+    pname: substituent_featurizer(MESO_POSITIONS, pname, navalue=None, with_h=True, symmetry="meso", prefix="meso_") +\
+        substituent_featurizer(BETA_POSITIONS, pname, navalue=None, with_h=True, symmetry="macrocycle", prefix="beta_")
+        for pname in ["connected_atom_mulliken", "connected_atom_loewdin", "hydrogen_mulliken", "hydrogen_loewdin"]
 }
 
-CLASSIFICATION_TARGETS = {
-    "saddling": FunctionFeaturizer("saddling", dominant_mode("saddling"), navalue=None),
-    "ruffling": FunctionFeaturizer("ruffling", dominant_mode("ruffling"), navalue=None),
-    "doming": FunctionFeaturizer("doming", dominant_mode("doming"), navalue=None),
-}
+MACROCYCLE_FEATURIZERS.update({
+    "raw_" + pname: substituent_featurizer(MESO_POSITIONS, pname, navalue=None, with_h=True, symmetry=None) +\
+        substituent_featurizer(BETA_POSITIONS, pname, navalue=None, with_h=True, symmetry=None)
+        for pname in ["connected_atom_mulliken", "connected_atom_loewdin", "hydrogen_mulliken", "hydrogen_loewdin"]
+})
 
-def augment_data(X, y):
-    new_X = []
-    new_y = []
-    for macro_pos in MACROCYCLE_POSITIONS:
-        for i in range(len(y)):
-            idxs = macro_pos + X.columns[len(macro_pos):].tolist()
-            equiv = X.iloc[i, :].loc[idxs].to_numpy()
-            new_X.append(equiv)
-            new_y.append(y.iloc[i, :])
-    return pd.DataFrame(new_X), pd.DataFrame(new_y)
-
-
-def make_data(session, featurizer: Featurizer, target: Featurizer, test_size: int=30, augment: bool=False):
-    sids = utils.sids_by_type(session, STYPE)
-    X = featurizer.featurize(session, sids)
-    y = target.featurize(session, sids)
+def make_data(features: pd.DataFrame, target: pd.DataFrame, test_size: int=30):
+    X = features.copy().dropna()
+    y = target.copy().dropna()
+    joined_index = X.index.intersection(y.index)
+    X = X.loc[joined_index]
+    y = y.loc[joined_index]
     xtrain, xtest, ytrain, ytest = train_test_split(X, y, test_size=test_size)
-    if augment:
-        xtrain, ytrain = augment_data(xtrain, ytrain)
-        xtest, ytest = augment_data(xtest, ytest)
-    return xtrain.values, xtest.values, ytrain.values, ytest.values
+    return xtrain, xtest, ytrain, ytest
 
 
-def run_bootstraps(session, featurizer: Featurizer, target: Featurizer, test_size: int, augment: bool, n_bootstraps: int):
-    data = []
-    models = []
-    for _ in range(n_bootstraps):
-        xtrain, xtest, ytrain, ytest = make_data(session, featurizer, target, test_size, augment)
-        model = RandomForestRegressor(n_estimators=1000)
-        model.fit(xtrain, ytrain)
-        # calculating metrics
-        metrics = utils.estimate_regression_fit(model.predict(xtrain), ytrain, "train_")
-        metrics.update(utils.estimate_regression_fit(model.predict(xtest), ytest, "test_"))
-        # adding to stack
-        models.append(model)
-        data.append(metrics)
-    return models, pd.DataFrame(data)
+def run_bootstrap(features: pd.DataFrame, target: pd.DataFrame, test_size: int, bootstrap_id: int, cv: int, save_dir: str):
+    # fix the seed to make everything the same
+    seed = bootstrap_id + 100
+    np.random.seed(seed)
+    random.seed(seed)
+    # now run
+    xtrain, xtest, ytrain, ytest = make_data(features, target, test_size)
+    # get sids
+    train_sids = xtrain.index
+    # now convert to np
+    xtrain = xtrain.values
+    xtest = xtest.values
+    ytrain = ytrain.values.ravel()
+    ytest = ytest.values.ravel()
+    model = RandomForestRegressor(n_estimators=1000)
+    kf = KFold(n_splits=cv, shuffle=True, random_state=seed)
+    cv_metrics = None
+    # run CV
+    for train_idx, val_idx in kf.split(xtrain):
+        xtr, xval = xtrain[train_idx], xtrain[val_idx]
+        ytr, yval = ytrain[train_idx], ytrain[val_idx]
+        model.fit(xtr, ytr)
+        val_metrics = utils.estimate_regression_fit(model.predict(xval), yval, "val_")
+        if cv_metrics is None:
+            cv_metrics = {k: [v] for k, v in val_metrics.items()}
+        else:
+            for k, v in val_metrics.items():
+                cv_metrics[k].append(v)
+
+    # Fit the model on the full training set
+    model.fit(xtrain, ytrain)
+    # Calculate metrics
+    metrics = utils.estimate_regression_fit(model.predict(xtrain), ytrain, "train_")
+    metrics.update(utils.estimate_regression_fit(model.predict(xtest), ytest, "test_"))
+    for k, v in cv_metrics.items():
+        metrics["avg_" + k] = np.mean(v)
+    # calclating SHAP values
+    explainer = shap.TreeExplainer(model)
+    shap_df = pd.DataFrame(explainer.shap_values(xtrain), columns=features.columns, index=train_sids)
+    # Save metrics as JSON
+    metrics_path = os.path.join(save_dir, "metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=4)
+    # Save SHAP values as CSV
+    shap_path = os.path.join(save_dir, "shap.csv")
+    shap_df.to_csv(shap_path)
+
+def _run_bootstrap(args):
+    return run_bootstrap(*args)
 
 
-def main(session, models_dir: str, augment: bool):
-    targets = REGRESSION_TARGETS
-    for feat in FEATURIZERS:
-        ajr = {}
-        for target in targets:
-            print("RUNNING {} WITH {}".format(feat, target))
-            # fixing random seed
-            np.random.seed(0)
-            random.seed(0)
-            # running fit
-            models, df = run_bootstraps(session, FEATURIZERS[feat], targets[target], n_bootstraps=10, augment=augment, test_size=30)
-            # saving results
-            path = os.path.join(models_dir, "{}_{}".format(feat, target))
+def main(session, models_dir: str, cv: int, nbootstraps: int, nworkers: int):
+    sids = utils.sids_by_type(session)
+    print("Building target properties...")
+    targets = TARGET_FEATURIZER.featurize(session, sids)
+    base_features = {"metal": {}, "macrocycle": {}, "axial": {}}
+    for metal, macro, axial in product(METAL_FEATURIZERS, MACROCYCLE_FEATURIZERS, AXIAL_FEATURIZERS):
+        print(f"** RUNNING metal={metal}, macro={macro}, axial={axial} **")
+        features = pd.DataFrame(index=sids)
+        # featurize metal
+        if not metal in base_features["metal"]:
+            print(f"featurizing metal with {metal}...")
+            base_features["metal"][metal] = METAL_FEATURIZERS[metal].featurize(session, sids)
+        features = pd.merge(features, base_features["metal"][metal], left_index=True, right_index=True)
+        # featurize macrocycle
+        if not macro in base_features["macrocycle"]:
+            print(f"featurizing macro with {macro}...")
+            base_features["macrocycle"][macro] = MACROCYCLE_FEATURIZERS[macro].featurize(session, sids)
+        features = pd.merge(features, base_features["macrocycle"][macro], left_index=True, right_index=True)
+        # featurize axial
+        if not axial in base_features["axial"]:
+            print(f"featurizing axial with {axial}...")
+            base_features["axial"][axial] = AXIAL_FEATURIZERS[axial].featurize(session, sids)
+        features = pd.merge(features, base_features["axial"][axial], left_index=True, right_index=True)
+        args = []
+        for target in targets.columns:
+            # making output directory
+            path = os.path.join(models_dir, f"metal={metal}_macro={macro}_axial={axial}_target={target}")
             if not os.path.isdir(path):
                 os.mkdir(path)
-            # save dataframe
-            df.to_csv(os.path.join(path, "metrics.csv"))
-            # save models
-            for i, model in enumerate(models):
-                ajr = os.path.join(path, str(i))
-                if not os.path.isdir(ajr):
-                    os.mkdir(ajr)
-                utils.save_model(model, os.path.join(path, str(i)))
+            # building arguments for fit
+            for i in range(nbootstraps):
+                bootstrap_path = os.path.join(path, str(i))
+                if not os.path.isdir(bootstrap_path):
+                    os.mkdir(bootstrap_path)
+                args.append([features, targets[target], 30, i, cv, bootstrap_path])
+        print(f"TRAINING ON {len(targets.columns)} TARGETS WITH {nbootstraps} BOOTSTRAP EXPERIMENTS ON {nworkers} WORKERS")
+        with Pool(processes=nworkers) as pool:
+            for _ in tqdm(pool.imap_unordered(_run_bootstrap, args), total=len(args)):
+                pass
 
 
 if __name__ == "__main__":
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
-    from featurizers import ComboFeaturizer
+    from src import config
     utils.define_pallet()
-    engine = create_engine("sqlite:///{}".format(os.environ("CRYSTAL_MAIB_DB")))
+    engine = create_engine("sqlite:///{}".format(os.environ["CRYSTAL_MAIN_DB"]))
     session = sessionmaker(bind=engine)()
-    main(session, os.environ("CRYSTAL_SRC_DIR") + "/models", True)
+    main(session, os.path.join(config.PROJECT_SRC_DIR, "models"), cv=5, nworkers=4, nbootstraps=10)

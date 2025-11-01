@@ -4,7 +4,7 @@ import numpy as np
 from typing import List
 from openbabel import openbabel as ob
 from sqlalchemy.orm import Session
-from src.sqlmodels import Structure, Substituent, SubstituentProperty
+from src.sqlmodels import Structure, StructureSubstituents, SubstituentProperty
 from src.utils import get_molecule
 from src.parsers.BaseParser import StructureParser
 
@@ -71,7 +71,7 @@ def cone_angle(points: np.ndarray, radii: np.ndarray, origin: np.ndarray, origin
 def get_ligands(session, sid, position) -> List[ob.OBMol]:
     """Get the ligand molecules as OBMol sorted by position index"""
     # fetch data from database
-    ligand_idxs = session.query(Substituent.atom_indicis, Substituent.position_index, Substituent.substituent).filter(Substituent.structure == sid).filter(Substituent.position == position).order_by(Substituent.position_index).all()
+    ligand_idxs = session.query(StructureSubstituents.atom_indicis, StructureSubstituents.position_index, StructureSubstituents.substituent).filter(StructureSubstituents.structure == sid).filter(StructureSubstituents.position == position).order_by(StructureSubstituents.position_index).all()
     mol = molecule_from_id(session, sid)
     # get ligand molecules
     ajr = []
@@ -98,13 +98,13 @@ def get_mol_entries(session, sid):
     positions = ["meso", "beta", "axial"]
     entries = []
     for pos in positions:
-        for points, radii, pos_idx, origin, origin_radius, smiles in get_ligands(session, sid, pos):
+        for points, radii, pos_idx, origin, origin_radius, subid in get_ligands(session, sid, pos):
             # print(sid, pos, pos_idx)
             if origin is None:
                 print("NULL ORIGIN ATOM AT", sid)
                 return []
             angle = cone_angle(points, radii, origin, origin_radius)
-            entry = SubstituentProperty(smiles=smiles, 
+            entry = SubstituentProperty(substituent=subid, 
                                         property="cone angle", 
                                         value=angle, 
                                         units="degree", 
@@ -139,11 +139,11 @@ class Parser (StructureParser):
         positions = ["meso", "beta", "axial"]
         entries = []
         for pos in positions:
-            for points, radii, pos_idx, origin, origin_radius, smiles in get_ligands(session, sid, pos):
+            for points, radii, pos_idx, origin, origin_radius, subid in get_ligands(session, sid, pos):
                 if origin is None:
                     return [], ["ERROR: null origin atom at " + sid]
                 angle = cone_angle(points, radii, origin, origin_radius)
-                entry = SubstituentProperty(smiles=smiles, 
+                entry = SubstituentProperty(substituent=subid, 
                                             property="cone angle", 
                                             value=angle, 
                                             units="degree", 

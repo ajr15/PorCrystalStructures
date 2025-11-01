@@ -69,11 +69,14 @@ class StructureParser (BaseParser):
         """Run the structure parser in parallel"""
         connection_string = str(session.get_bind().engine.url)
         sids = self.fetch_structure_ids(session)
+        args = [(connection_string, sid) for sid in sids]
+        # if n > 1:
         with Pool(processes=n) as pool:
-            args = [(connection_string, sid) for sid in sids]
             ajr = list(tqdm(pool.imap(self._parse_structure, args), total=len(sids), desc="Processing structures"))
-            results = [x[0] for x in ajr]
-            messages = list(chain(*[x[-1] for x in ajr]))
+        # else:
+        #     ajr = [self._parse_structure(a) for a in args]
+        results = [x[0] for x in ajr]
+        messages = list(chain(*[x[-1] for x in ajr]))
         print("Done!")
         if len(messages) > 0:
             print("== Run Messages ==")

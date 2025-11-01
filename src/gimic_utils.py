@@ -1,10 +1,10 @@
 import vtk
 import numpy as np
+from numpy.polynomial.legendre import leggauss
 from typing import List
 from scipy.interpolate import RegularGridInterpolator
-from scipy.integrate import tplquad
-from scipy.integrate import dblquad
 from openbabel import openbabel as ob
+from functools import lru_cache
 from vtkmodules.util.numpy_support import vtk_to_numpy
 
 def read_vti_file(file_path) -> vtk.vtkImageData:
@@ -110,6 +110,125 @@ def get_vector_function(vti_data: vtk.vtkImageData, vector_name: str="vectors"):
         return tuple(interpolator((x, y, z)) for interpolator in interpolators)
     
     return vector_function
+
+def _gl_on_subrect(vector_function, center, u, v, s0, s1, t0, t1, normal, N):
+    """
+    Compute GL tensor-product on subrectangle with s in [s0,s1], t in [t0,t1].
+    s,t are coordinates along u and v (signed distances from center).
+    """
+    # nodes & weights on [-1,1]
+    x, w = leggauss(N)
+
+    # map x->s,t
+    half_s = 0.5 * (s1 - s0)
+    mid_s = 0.5 * (s1 + s0)
+    half_t = 0.5 * (t1 - t0)
+    mid_t = 0.5 * (t1 + t0)
+
+    ws = half_s * w
+    wt = half_t * w
+    s_nodes = mid_s + half_s * x
+    t_nodes = mid_t + half_t * x
+
+    flux = 0.0
+    # loop small N^2 (N up to ~12 is fine)
+    for i in range(N):
+        si = s_nodes[i]
+        wsi = ws[i]
+        for j in range(N):
+            tj = t_nodes[j]
+            wtj = wt[j]
+
+            # map to 3D point
+            r = center + si * u + tj * v
+            Jx, Jy, Jz = vector_function(r[0], r[1], r[2])
+            J = np.array([Jx, Jy, Jz], float)
+            flux += wsi * wtj * np.dot(J, normal)
+
+    # area Jacobian: for u,v not unit or not orthogonal
+    jac = np.linalg.norm(np.cross(u, v))
+    return flux * jac
+
+def calculate_flux_through_plane_adaptive(
+    vector_function,
+    center,
+    width,
+    height,
+    normal,
+    N=8,
+    tol_rel=1e-3,
+    tol_abs=0.0,
+    max_depth=6,
+):
+    """
+    Adaptive GL quadrature over rectangular plane.
+    Args:
+        vector_function: f(x,y,z)->(Jx,Jy,Jz)
+        center: 3-array, rectangle center in 3D
+        width: total width along u (float)
+        height: total height along v (float)
+        normal: plane normal (3-array)
+        N: base GL order (int) used per subrectangle
+        tol_rel: relative tolerance for local error
+        tol_abs: absolute tolerance for local error
+        max_depth: maximum subdivision depth
+    Returns:
+        flux (float)
+    """
+
+    center = np.array(center, float)
+    normal = np.array(normal, float)
+    normal /= np.linalg.norm(normal)
+
+    # build robust u,v basis in plane
+    tmp = np.array([1.0, 0.0, 0.0])
+    if np.allclose(normal, tmp):
+        tmp = np.array([0.0, 1.0, 0.0])
+
+    u = np.cross(normal, tmp)
+    u /= np.linalg.norm(u)
+    v = np.cross(normal, u)
+    v /= np.linalg.norm(v)
+
+    # s,t ranges relative to center
+    s_min, s_max = -0.5 * width, 0.5 * width
+    t_min, t_max = -0.5 * height, 0.5 * height
+
+    # simple cache wrapper around vector_function to avoid re-evaluating same points
+    # key by rounded coordinates (you may adapt precision)
+    @lru_cache(maxsize=100000)
+    def vf_cached(x, y, z):
+        return tuple(vector_function(float(x), float(y), float(z)))
+
+    def vf_wrapper(x, y, z):
+        return vf_cached(round(x,9), round(y,9), round(z,9))
+
+    # recursive adaptive routine
+    def recurse(s0, s1, t0, t1, depth):
+        # coarse estimate (N) and fine estimate (2N)
+        f_coarse = _gl_on_subrect(vf_wrapper, center, u, v, s0, s1, t0, t1, normal, N)
+        f_fine = _gl_on_subrect(vf_wrapper, center, u, v, s0, s1, t0, t1, normal, 2*N)
+
+        # error estimate
+        err = abs(f_fine - f_coarse)
+        tol_local = max(tol_abs, tol_rel * max(abs(f_fine), 1.0))
+
+        if (err <= tol_local) or (depth >= max_depth):
+            # accept fine value
+            return f_fine
+        else:
+            # subdivide into 4 subrectangles (bisect s and t)
+            sm = 0.5 * (s0 + s1)
+            tm = 0.5 * (t0 + t1)
+            return (
+                recurse(s0, sm, t0, tm, depth+1)
+                + recurse(sm, s1, t0, tm, depth+1)
+                + recurse(s0, sm, tm, t1, depth+1)
+                + recurse(sm, s1, tm, t1, depth+1)
+            )
+
+    total_flux = recurse(s_min, s_max, t_min, t_max, depth=0)
+    return total_flux
 
 def calculate_flux_through_circle(vector_function, center: np.ndarray, radius: np.ndarray, normal: np.ndarray):
     """
@@ -217,7 +336,7 @@ def calculate_masked_integral(atoms: List[ob.OBAtom], vti_file: str):
     return integral
 
 
-def calculate_flux_through_bond(bond: ob.OBBond, vti_file: str, bond_radius: float):
+def calculate_flux_through_bond(bond: ob.OBBond, vti_data: vtk.vtkImageData, bond_radius: float):
     """
     Calculates the flux of a vector field through a bond.
 
@@ -229,8 +348,7 @@ def calculate_flux_through_bond(bond: ob.OBBond, vti_file: str, bond_radius: flo
     Returns:
         float: The flux of the vector field through the bond.
     """
-    # Read the .vti file and extract the vector function
-    vti_data = read_vti_file(vti_file)
+    # extract the vector function
     vector_function = get_vector_function(vti_data)
 
     # Get the bond's start and end points
