@@ -145,9 +145,9 @@ class Parser (StructureParser):
 
 
     def parse_structure(self, session, sid):
-        outfile = os.path.join(config.DATA_DIR, "old_nmr", sid + "_0_out", sid + "_0.out")
+        outfile = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", sid + "_0.out")
         if not os.path.exists(outfile):
-            return [], ["INFO: No NMR calculation for " + sid]
+            return [], [f"INFO: No NMR calculation for {sid} ({outfile})"]
         finished_normally = read_file_to_blocks(outfile, [FinishedNormally("")])[0]
         if not finished_normally.value():
             return [], ["INFO: Bad NMR calculation for " + sid]

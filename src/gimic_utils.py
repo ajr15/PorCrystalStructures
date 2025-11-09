@@ -58,24 +58,24 @@ def get_vti_grid(vti_data: vtk.vtkImageData):
 
 
 def get_scalar_values(vti_data: vtk.vtkImageData, scalar_name: str="scalars") -> np.ndarray:
-    """
-    Converts a scalar field in the .vti file to a scalar-valued function in 3D space
-    using linear interpolation.
-    
-    Args:
-        vti_data (vtk.vtkImageData): The image data from the .vti file.
-        scalar_name (str): Name of the scalar field.
-    
-    Returns:
-        np.array: array with scalar values on the vti data grid
-    """
-    scalar_field = vti_data.GetPointData().GetArray(scalar_name)
-    if not scalar_field:
-        raise ValueError(f"Scalar field '{scalar_name}' not found in the .vti file.")
-    
+    """Load a VTI grid and scalar field"""
     dims = vti_data.GetDimensions()
-    
-    return vtk_to_numpy(scalar_field).reshape(dims, order='F')
+    origin = np.array(vti_data.GetOrigin())
+    spacing = np.array(vti_data.GetSpacing())
+
+    # convert coords
+    xs = origin[0] + spacing[0] * np.arange(dims[0])
+    ys = origin[1] + spacing[1] * np.arange(dims[1])
+    zs = origin[2] + spacing[2] * np.arange(dims[2])
+    # read ACID field
+    point_data = vti_data.GetPointData()
+    if scalar_name:
+        arr = point_data.GetArray(scalar_name)
+    else:  
+        arr = point_data.GetArray(0)  # assume first array
+    acid_flat = vtk_to_numpy(arr)
+
+    return xs, ys, zs, acid_flat, spacing
     
 
 def get_vector_function(vti_data: vtk.vtkImageData, vector_name: str="vectors"):
@@ -110,6 +110,8 @@ def get_vector_function(vti_data: vtk.vtkImageData, vector_name: str="vectors"):
         return tuple(interpolator((x, y, z)) for interpolator in interpolators)
     
     return vector_function
+
+# ======= ANALYZE GIMIC OUTPUT =======
 
 def _gl_on_subrect(vector_function, center, u, v, s0, s1, t0, t1, normal, N):
     """
@@ -230,113 +232,7 @@ def calculate_flux_through_plane_adaptive(
     total_flux = recurse(s_min, s_max, t_min, t_max, depth=0)
     return total_flux
 
-def calculate_flux_through_circle(vector_function, center: np.ndarray, radius: np.ndarray, normal: np.ndarray):
-    """
-    Calculates the flux of a vector function through a circle with a given center, radius, and normal.
-
-    Args:
-        vector_function (function): A vector-valued function f(x, y, z) -> (vx, vy, vz).
-        center (tuple): The (x, y, z) coordinates of the circle's center.
-        radius (float): The radius of the circle.
-        normal (tuple): The (nx, ny, nz) normal vector of the circle.
-        num_points (int): Number of points to sample on the circle.
-
-    Returns:
-        float: The flux of the vector function through the circle.
-    """
-
-    # Normalize the normal vector
-    normal = np.array(normal)
-    normal = normal / np.linalg.norm(normal)
-
-    # Generate two orthogonal vectors in the plane of the circle
-    if np.allclose(normal, [1, 0, 0]):
-        u = np.array([0, 1, 0])
-    else:
-        u = np.cross(normal, [1, 0, 0])
-    u = u / np.linalg.norm(u)
-    v = np.cross(normal, u)
-
-    # Approximate the circle as a polygon with N sides
-    N = 1000  # Number of sides for the polygon approximation
-    angles = np.linspace(0, 2 * np.pi, N, endpoint=False)
-    points = [center + radius * (np.cos(angle) * u + np.sin(angle) * v) for angle in angles]
-
-    # Calculate the flux using the polygon approximation
-    flux = 0.0
-    for i in range(N):
-        p1 = points[i]
-        p2 = points[(i + 1) % N]  # Next point, wrapping around
-        midpoint = (p1 + p2) / 2
-        vector_value = vector_function(midpoint[0], midpoint[1], midpoint[2])
-        edge = p2 - p1
-        edge_normal = np.cross(normal, edge)
-        edge_normal = edge_normal / np.linalg.norm(edge_normal) * np.linalg.norm(edge)
-        flux += np.dot(vector_value, edge_normal)
-
-    flux /= 2  # Divide by 2 to account for the polygon approximation
-
-    return flux
-
-def create_atomic_radius_function(atoms: List[ob.OBAtom]):
-    """
-    Creates a function that checks if a point is within the radius of any atom.
-
-    Args:
-        atoms (list of ob.OBAtom): A list of openbabel atoms
-
-    Returns:
-        function: A scalar-valued function f(x, y, z) that returns 1 if the point is within
-                  the radius of any atom, and 0 otherwise.
-    """
-    centers = np.array([[atom.GetX(), atom.GetY(), atom.GetZ()] for atom in atoms])
-    radii_values = np.array([ob.GetCovalentRad(atom.GetAtomicNum()) for atom in atoms])
-
-    def atomic_radius_function(x, y, z):
-        point = np.array([x, y, z])
-        distances_squared = np.sum((centers - point)**2, axis=1)
-        within_radius = distances_squared <= radii_values**2
-        return 1 if np.any(within_radius) else 0
-
-    return atomic_radius_function
-
-def calculate_masked_integral(atoms: List[ob.OBAtom], vti_file: str):
-    """
-    Calculates the integral of a scalar function masked by the atomic radius function of the atoms.
-
-    Args:
-        obmol (openbabel.OBMol): An OpenBabel molecule object.
-        vti_file (str): Path to the .vti file containing the scalar field.
-        scalar_name (str): Name of the scalar field in the .vti file.
-        radii (dict): A dictionary mapping atomic symbols to their respective radii.
-
-    Returns:
-        float: The masked integral of the scalar function.
-    """
-    # Read the .vti file and extract the scalar function
-    vti_data = read_vti_file(vti_file)
-    function_values = get_scalar_values(vti_data)
-    
-    # Create the atomic radius function
-    atomic_radius_function = create_atomic_radius_function(atoms)
-
-    # Create a grid of points
-    x, y, z = get_vti_grid(vti_data)
-    X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-
-    # Evaluate the atomic radius function on the grid
-    atomic_mask = np.vectorize(atomic_radius_function)(X, Y, Z)
-
-    # Perform element-wise multiplication of the scalar values and the mask
-    masked_values = function_values * atomic_mask
-
-    # Calculate the integral as the sum of the masked values multiplied by the voxel volume
-    integral = np.sum(masked_values) / np.sum(atomic_mask)
-
-    return integral
-
-
-def calculate_flux_through_bond(bond: ob.OBBond, vti_data: vtk.vtkImageData, bond_radius: float):
+def calculate_flux_through_bond(bond: ob.OBBond, vti_data: vtk.vtkImageData, surface_width: float, surface_height: float, n_gl: int=10):
     """
     Calculates the flux of a vector field through a bond.
 
@@ -363,4 +259,158 @@ def calculate_flux_through_bond(bond: ob.OBBond, vti_data: vtk.vtkImageData, bon
     normal = direction / np.linalg.norm(direction)
 
     # Calculate the flux through the bond
-    return calculate_flux_through_circle(vector_function, center, bond_radius, normal)
+    return calculate_flux_through_plane_adaptive(vector_function, center, surface_width, surface_height, normal, N=n_gl)
+
+# ======= ANALYZE ACID OUTPUT =======
+
+def proj_dist_points_to_segment(points, a, b):
+    """
+    Vectorized distance of many points to one segment.
+    points: (N,3)
+    a,b: (3,)
+    returns distances (N,)
+    """
+    ab = b - a
+    ap = points - a
+    bp = points - b
+    ab_norm = np.dot(ab, ab)
+    t = np.sum(ap * ab, axis=1) / ab_norm
+
+    # Calculate orthogonal projection distances
+    proj = a + np.outer(t, ab)
+    orthogonal_distances = np.linalg.norm(points - proj, axis=1)
+
+    # Check if projection is within the segment
+    within_segment = (t >= 0.0) & (t <= 1.0)
+
+    # Calculate distances to endpoints
+    distances_to_a = np.linalg.norm(ap, axis=1)
+    distances_to_b = np.linalg.norm(bp, axis=1)
+
+    # Combine distances based on projection position
+    result_distances = np.where(within_segment, orthogonal_distances, np.minimum(distances_to_a, distances_to_b))
+    return result_distances
+
+
+def compute_bond_voronoi(xs, ys, zs, bonds):
+    """
+    xs,ys,zs: coordinate vectors from VTK
+    bonds: list of (atom_i_coords, atom_j_coords)
+
+    returns bond_idx_grid, shape = (Nx,Ny,Nz)
+    """
+    X, Y, Z = np.meshgrid(xs, ys, zs, indexing='ij')
+    points = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
+
+    nbonds = len(bonds)
+    distances = np.zeros((len(points), nbonds))
+
+    for j,(a,b) in enumerate(bonds):
+        distances[:,j] = proj_dist_points_to_segment(points, np.array(a), np.array(b))
+
+    nearest = np.argmin(distances, axis=1)  
+    return nearest.reshape(len(xs), len(ys), len(zs))
+
+
+def integrate_acid_per_bond_vtk(acid_grid, bond_map, spacing, nbonds):
+    dV = spacing[0] * spacing[1] * spacing[2]
+    bond_integrals = np.zeros(nbonds)
+
+    for b in range(nbonds):
+        mask = (bond_map == b)
+        bond_integrals[b] = np.sum(acid_grid[mask]) * dV
+
+    return bond_integrals
+
+def close_points(xs, ys, zs, mol, th: float):
+    for atom in ob.OBMolAtomIter(mol):
+        atom_coords = np.array([atom.GetX(), atom.GetY(), atom.GetZ()])
+        distances = np.sqrt(
+            (xs[:, None, None] - atom_coords[0])**2 +
+            (ys[None, :, None] - atom_coords[1])**2 +
+            (zs[None, None, :] - atom_coords[2])**2
+        )
+        sanitized_grid = distances < th
+    return sanitized_grid.reshape(len(xs), len(ys), len(zs))
+
+if __name__ == "__main__":
+    import utils
+    from openbabel import openbabel as ob
+    import matplotlib.pyplot as plt
+
+    acid_vti_file = "data/test/benzene/acid.vti.ref"
+    vti_data = read_vti_file(acid_vti_file)
+    for i in range(vti_data.GetPointData().GetNumberOfArrays()):
+        print(i, vti_data.GetPointData().GetArrayName(i))
+    xs, ys, zs, acid_grid, spacing = get_scalar_values(vti_data)
+    print("negative points", np.count_nonzero(acid_grid < 0))
+    mol = utils.get_molecule("data/test/benzene/mol.xyz")
+    # Remove the last two atoms from the molecule
+    for _ in range(2):
+        mol.DeleteAtom(mol.GetAtom(mol.NumAtoms()))
+    # # 2. Define bonds as ((x1,y1,z1),(x2,y2,z2)) list
+    bonds = []
+    for bond in ob.OBMolBondIter(mol):
+        a1 = bond.GetBeginAtom()
+        a2 = bond.GetEndAtom()
+        # if a1.GetAtomicNum() == 6 and a2.GetAtomicNum() == 6:
+        bonds.append((
+            (a1.GetX(), a1.GetY(), a1.GetZ()),
+            (a2.GetX(), a2.GetY(), a2.GetZ())
+        ))
+
+
+    bond_map = compute_bond_voronoi(xs, ys, zs, bonds)
+    
+
+    # Extract points where z=0
+    z_index = np.argmin(np.abs(zs))  # Find the index where z is closest to 0
+    xy_points = np.column_stack([np.repeat(xs, len(ys)), np.tile(ys, len(xs))])
+    assignments = bond_map.reshape(len(xs), len(ys), len(zs))[:, :, z_index].ravel()
+    # bad_points = close_points(xs, ys, zs, mol, 1)
+    acid_grid = acid_grid.reshape(len(xs), len(ys), len(zs))
+    valid_bonds = {0, 3, 5, 7, 9, 1}
+    acid_grid = np.where(~np.isin(bond_map, list(valid_bonds)), 0, acid_grid)
+    # acid_grid = np.where(bad_points, np.zeros_like(acid_grid), acid_grid)
+    acid_values = acid_grid[:, :, z_index].ravel()
+
+    # Create a scatter plot
+    plt.figure(figsize=(10, 8))
+    scatter = plt.scatter(xy_points[:, 0], xy_points[:, 1], c=acid_values, cmap='Oranges', s=10)
+    plt.colorbar(scatter, label="Bond Assignment")
+    plt.xlabel("X")
+    plt.ylabel("Y")
+    plt.title("2D Plot of Points Colored by Bond Assignment (z=0)")
+    # Plot the bonds as lines
+    for i, (a, b) in enumerate(bonds):
+        a = np.array(a)
+        b = np.array(b)
+        plt.plot([a[0], b[0]], [a[1], b[1]], color='black', linewidth=2)
+        # Calculate the midpoint of the bond
+        midpoint = (a + b) / 2
+        # Annotate the bond index at the midpoint
+        plt.text(midpoint[0], midpoint[1], str(i), color='red', fontsize=12, ha='center', va='center')
+
+    bond_acid = integrate_acid_per_bond_vtk(acid_grid, bond_map, spacing, len(bonds))
+    # Create a figure to visualize bonds colored by their ACID value
+    # plt.figure(figsize=(10, 8))
+    # norm = plt.Normalize(vmin=np.min(bond_acid), vmax=np.max(bond_acid))
+    # cmap = plt.cm.Greens
+
+    # for i, (a, b) in enumerate(bonds):
+    #     a = np.array(a)
+    #     b = np.array(b)
+    #     color = cmap(norm(bond_acid[i]))
+    #     plt.plot([a[0], b[0]], [a[1], b[1]], color=color, linewidth=4)
+
+    # sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    # sm.set_array([])
+    # plt.colorbar(sm, label="ACID Value", ax=plt.gca())
+    # plt.xlabel("X")
+    # plt.ylabel("Y")
+    # plt.title("Bonds Colored by ACID Value")
+    # print(f"Bond | Points | ACID")
+    # for i, acid in enumerate(bond_acid):
+    #     print(f"{i:2d} | {np.sum(bond_map == i):6d} | {acid:.3f}")
+    plt.show()
+    # 0, 3, 5, 7, 9, 1
