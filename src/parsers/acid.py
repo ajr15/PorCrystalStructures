@@ -47,81 +47,74 @@ def get_macrocycle_atoms(mol: ob.OBMol):
     return atom_mapper
 
 
-def calculate_bond_current_records(sid, mol: ob.OBMol, atom_mapper: dict, width, height, data):
+def get_macrocycle_bonds(mol: ob.OBMol):
+    atom_idxs = get_macrocycle_atoms(mol).keys()
+    mol.ConnectTheDots()
+    bonds = []
+    covered = set()
+    for idx in atom_idxs:
+        atom = mol.GetAtom(idx)
+        covered.add(idx)
+        for bond in ob.OBAtomBondIter(atom):
+            bidx = bond.GetBeginAtomIdx()
+            eidx = bond.GetEndAtomIdx()
+            if eidx in covered and bidx in covered: 
+                continue
+            if bidx in atom_idxs and eidx in atom_idxs:
+                bonds.append(bond)
+    return bonds
+
+
+
+def calculate_acid_records(sid, atom_mapper: dict, bonds, radius: float, data):
     """Calculate bond integrals for bonds within the macrocycle."""
     res = []
-    for atom_idx in atom_mapper.keys():
-        atom_obj = mol.GetAtom(atom_idx)
-        for nbr in ob.OBAtomAtomIter(atom_obj):
-            nbr_idx = nbr.GetIdx()
-            if nbr_idx in atom_mapper.keys() and atom_idx < nbr_idx:
-                bond = mol.GetBond(atom_obj.GetIdx(), nbr.GetIdx())
-                integral = gutils.calculate_flux_through_bond(
-                    bond, data, width, height
-                )
-                begin= atom_mapper[bond.GetBeginAtomIdx()] 
-                end = atom_mapper[bond.GetEndAtomIdx()]  
-                ajr = [
-                    StructureProperty(
-                        structure=sid, 
-                        property=f"current/mapped/{begin}->{end}",
-                        value=integral,
-                        source=f"h={height}&w={width}"
-                    ),
-                    StructureProperty(
-                        structure=sid, 
-                        property=f"current/original/{bond.GetBeginAtomIdx()}->{bond.GetEndAtomIdx()}",
-                        value=integral,
-                        source=f"h={height}&w={width}"
-                    )
-                ]
-                res.extend(ajr)
+    xs, ys, zs, acid_grid, spacing = gutils.get_scalar_values(data)
+    acid_func = gutils.create_acid_interpolator(acid_grid, xs, ys, zs)
+    acids = {}
+    for bond in bonds:
+        acid = gutils.integrate_acid_around_bond(
+            acid_func, bond, spacing, radius
+        )
+        begin = atom_mapper[bond.GetBeginAtomIdx()] 
+        end = atom_mapper[bond.GetEndAtomIdx()]  
+        ajr = [
+            StructureProperty(
+                structure=sid, 
+                property=f"mapped/{begin}->{end}",
+                value=acid,
+                source=f"radius={radius}"
+            ),
+            StructureProperty(
+                structure=sid, 
+                property=f"original/{bond.GetBeginAtomIdx()}->{bond.GetEndAtomIdx()}",
+                value=acid,
+                source=f"radius={radius}"
+            )
+        ]
+        res.extend(ajr)
     return res
 
 
 class Parser (StructureParser):
 
-    name = "gimic"
-    source_prefix = "gimic/"
-    widths = [1.5 + 0.5 * i for i in range(8)]
-    heights = [1.5 + 0.5 * i for i in range(8)]
+    name = "acid"
+    source_prefix = "acid/"
+    radii = [0.5 + 0.5 * i for i in range(8)]
 
     def parse_structure(self, session, sid):
-        jvec_file = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", "gimic", "jvec.vti")
+        jvec_file = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", "gimic", "acid.vti")
         if not os.path.exists(jvec_file):
             return [], [f"INFO: No GIMIC calculation for {sid} ({jvec_file})"]
         mol_file = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", "gimic", "mol.xyz")
         mol = utils.get_molecule(mol_file)
         atom_mapper = get_macrocycle_atoms(mol)
+        bonds = get_macrocycle_bonds(mol)
         vti_data = gutils.read_vti_file(jvec_file)
         entries = []
-        for width in self.widths:
-            for height in self.heights:
-                entries.extend(calculate_bond_current_records(sid, mol, atom_mapper, width, height, vti_data))
+        for r in self.radii:
+            entries.extend(calculate_acid_records(sid, atom_mapper, bonds, r, vti_data))
         return entries, [] 
-
-    def parse(self, session, n):
-        """Run the structure parser in parallel"""
-        connection_string = str(session.get_bind().engine.url)
-        sids = self.fetch_structure_ids(session)
-        args = [(connection_string, sid) for sid in sids]
-        # if n > 1:
-        # with Pool(processes=n) as pool:
-        #     ajr = list(tqdm(pool.imap(self._parse_structure, args), total=len(sids), desc="Processing structures"))
-        # else:
-        ajr = []
-        for i, a in enumerate(args):
-            _, sid = a
-            print(f"Parsing {sid} ({i + 1} out of {len(args)})")
-            ajr.append(self._parse_structure(a))
-        results = [x[0] for x in ajr]
-        messages = list(chain(*[x[-1] for x in ajr]))
-        print("Done!")
-        if len(messages) > 0:
-            print("== Run Messages ==")
-            for m in messages:
-                print(m)
-        return list(chain(*results))
 
 if __name__ == "__main__":
     from sqlalchemy import create_engine

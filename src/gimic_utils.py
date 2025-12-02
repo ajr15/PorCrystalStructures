@@ -73,9 +73,12 @@ def get_scalar_values(vti_data: vtk.vtkImageData, scalar_name: str="scalars") ->
         arr = point_data.GetArray(scalar_name)
     else:  
         arr = point_data.GetArray(0)  # assume first array
-    acid_flat = vtk_to_numpy(arr)
-
-    return xs, ys, zs, acid_flat, spacing
+    # read scalar data and reshpe to grid
+    flat = vtk_to_numpy(arr)
+    grid = flat.reshape((dims[2], dims[1], dims[0]))
+    grid = np.transpose(grid, (2,1,0))
+    # grid = flat.reshape(dims + (-1,), order='F')
+    return xs, ys, zs, grid, spacing
     
 
 def get_vector_function(vti_data: vtk.vtkImageData, vector_name: str="vectors"):
@@ -301,6 +304,8 @@ def compute_bond_voronoi(xs, ys, zs, bonds):
     """
     X, Y, Z = np.meshgrid(xs, ys, zs, indexing='ij')
     points = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
+    # points = np.column_stack([xs, ys, zs])
+
 
     nbonds = len(bonds)
     distances = np.zeros((len(points), nbonds))
@@ -312,7 +317,7 @@ def compute_bond_voronoi(xs, ys, zs, bonds):
     return nearest.reshape(len(xs), len(ys), len(zs))
 
 
-def integrate_acid_per_bond_vtk(acid_grid, bond_map, spacing, nbonds):
+def integrate_acid_per_bond(acid_grid, bond_map, spacing, nbonds):
     dV = spacing[0] * spacing[1] * spacing[2]
     bond_integrals = np.zeros(nbonds)
 
@@ -322,33 +327,105 @@ def integrate_acid_per_bond_vtk(acid_grid, bond_map, spacing, nbonds):
 
     return bond_integrals
 
-def close_points(xs, ys, zs, mol, th: float):
-    for atom in ob.OBMolAtomIter(mol):
-        atom_coords = np.array([atom.GetX(), atom.GetY(), atom.GetZ()])
-        distances = np.sqrt(
-            (xs[:, None, None] - atom_coords[0])**2 +
-            (ys[None, :, None] - atom_coords[1])**2 +
-            (zs[None, None, :] - atom_coords[2])**2
-        )
-        sanitized_grid = distances < th
-    return sanitized_grid.reshape(len(xs), len(ys), len(zs))
+def create_acid_interpolator(acid_grid, xs, ys, zs):
+    """
+    Creates an interpolator function for the ACID grid.
+
+    Args:
+        acid_grid (np.ndarray): The scalar field grid (ACID values).
+        xs, ys, zs (np.ndarray): The grid coordinates along x, y, z axes.
+
+    Returns:
+        function: A function that takes x, y, z and returns the interpolated ACID value.
+    """
+    interpolator = RegularGridInterpolator((xs, ys, zs), acid_grid, bounds_error=False, fill_value=None)
+
+    def acid_function(x, y, z):
+        return interpolator((x, y, z))
+
+    return acid_function
+
+def integrate_acid_around_bond(acid_function, bond: ob.OBBond, spacing, R):
+    """
+    Integrates the ACID values around a bond within a cylindrical region of radius R.
+
+    Args:
+        acid_function (function): A function that takes (x, y, z) and returns the interpolated ACID value.
+        bond (ob.OBBond): An OpenBabel bond object.
+        spacing (tuple): The grid spacing along x, y, z axes.
+        R (float): Radius of the cylinder around the bond.
+
+    Returns:
+        float: Integrated ACID value for the bond.
+    """
+    # Get the bond's start and end points
+    atom1 = bond.GetBeginAtom()
+    atom2 = bond.GetEndAtom()
+    a = np.array([atom1.GetX(), atom1.GetY(), atom1.GetZ()])
+    c = np.array([atom2.GetX(), atom2.GetY(), atom2.GetZ()])
+
+    ab = c - a
+    ab_norm = np.linalg.norm(ab)
+    ab_unit = ab / ab_norm
+
+    # Define a grid of points along the bond axis and within the cylinder radius
+    num_points_along_bond = int(ab_norm / spacing[0]) + 1
+    num_points_radial = int(R / spacing[0]) + 1
+
+    integral = 0.0
+
+    for i in range(num_points_along_bond):
+        t = i / (num_points_along_bond - 1)
+        point_on_bond = a + t * ab
+
+        for j in range(num_points_radial):
+            for k in range(num_points_radial):
+                # Generate points in the radial plane
+                theta = 2 * np.pi * j / num_points_radial
+                r = R * k / num_points_radial
+                offset = r * np.array([np.cos(theta), np.sin(theta), 0])
+
+                # Rotate offset to align with the bond direction
+                rotation_matrix = np.eye(3)
+                rotation_matrix[:2, :2] = [[ab_unit[0], -ab_unit[1]], [ab_unit[1], ab_unit[0]]]
+                rotated_offset = rotation_matrix @ offset
+
+                # Calculate the final point
+                final_point = point_on_bond + rotated_offset
+                integral += acid_function(*final_point) * spacing[0] * spacing[1] * spacing[2]
+
+    return integral
+
+
+def calculate_bond_integrals(vti_data: vtk.vtkImageData, bonds: List[ob.OBBond]):
+    # extract data from vti data
+    xs, ys, zs, acid_grid, spacing = get_scalar_values(vti_data)
+    # extract atom coordinates from all bonds
+    ajr = []
+    for bond in bonds:
+        a1 = bond.GetBeginAtom()
+        a2 = bond.GetEndAtom()
+        ajr.append((
+            (a1.GetX(), a1.GetY(), a1.GetZ()),
+            (a2.GetX(), a2.GetY(), a2.GetZ())
+        ))
+    # assign each grid point to bond (using voronoi nearest neighbors algorithm)
+    bond_map = compute_bond_voronoi(xs, ys, zs, ajr)
+    # return bond integral values
+    return integrate_acid_per_bond_vtk(acid_grid, bond_map, spacing, len(bonds))
 
 if __name__ == "__main__":
     import utils
     from openbabel import openbabel as ob
     import matplotlib.pyplot as plt
 
-    acid_vti_file = "data/test/benzene/acid.vti.ref"
+    acid_vti_file = "data/test/benzene/hr_acid.vti"
     vti_data = read_vti_file(acid_vti_file)
-    for i in range(vti_data.GetPointData().GetNumberOfArrays()):
-        print(i, vti_data.GetPointData().GetArrayName(i))
     xs, ys, zs, acid_grid, spacing = get_scalar_values(vti_data)
-    print("negative points", np.count_nonzero(acid_grid < 0))
     mol = utils.get_molecule("data/test/benzene/mol.xyz")
-    # Remove the last two atoms from the molecule
     for _ in range(2):
         mol.DeleteAtom(mol.GetAtom(mol.NumAtoms()))
-    # # 2. Define bonds as ((x1,y1,z1),(x2,y2,z2)) list
+    # 2. Define bonds as ((x1,y1,z1),(x2,y2,z2)) list
     bonds = []
     for bond in ob.OBMolBondIter(mol):
         a1 = bond.GetBeginAtom()
@@ -360,18 +437,11 @@ if __name__ == "__main__":
         ))
 
 
-    bond_map = compute_bond_voronoi(xs, ys, zs, bonds)
     
 
     # Extract points where z=0
     z_index = np.argmin(np.abs(zs))  # Find the index where z is closest to 0
     xy_points = np.column_stack([np.repeat(xs, len(ys)), np.tile(ys, len(xs))])
-    assignments = bond_map.reshape(len(xs), len(ys), len(zs))[:, :, z_index].ravel()
-    # bad_points = close_points(xs, ys, zs, mol, 1)
-    acid_grid = acid_grid.reshape(len(xs), len(ys), len(zs))
-    valid_bonds = {0, 3, 5, 7, 9, 1}
-    acid_grid = np.where(~np.isin(bond_map, list(valid_bonds)), 0, acid_grid)
-    # acid_grid = np.where(bad_points, np.zeros_like(acid_grid), acid_grid)
     acid_values = acid_grid[:, :, z_index].ravel()
 
     # Create a scatter plot
@@ -389,10 +459,19 @@ if __name__ == "__main__":
         # Calculate the midpoint of the bond
         midpoint = (a + b) / 2
         # Annotate the bond index at the midpoint
-        plt.text(midpoint[0], midpoint[1], str(i), color='red', fontsize=12, ha='center', va='center')
+        # plt.text(midpoint[0], midpoint[1], str(i), color='red', fontsize=12, ha='center', va='center')
 
-    bond_acid = integrate_acid_per_bond_vtk(acid_grid, bond_map, spacing, len(bonds))
-    # Create a figure to visualize bonds colored by their ACID value
+    # bond_acid = calculate_bond_integrals(vti_data, list(ob.OBMolBondIter(mol)))
+    # for i, acid in enumerate(bond_acid):
+    #     print(f"{i:2d} | {acid:.4f}")
+
+    acid_func = create_acid_interpolator(acid_grid, xs, ys, zs)
+    acids = []
+    for bond in ob.OBMolBondIter(mol):
+        acids.append(integrate_acid_around_bond(acid_func, bond, spacing, R=1))
+    print(acids)
+
+    # # Create a figure to visualize bonds colored by their ACID value
     # plt.figure(figsize=(10, 8))
     # norm = plt.Normalize(vmin=np.min(bond_acid), vmax=np.max(bond_acid))
     # cmap = plt.cm.Greens
@@ -410,7 +489,5 @@ if __name__ == "__main__":
     # plt.ylabel("Y")
     # plt.title("Bonds Colored by ACID Value")
     # print(f"Bond | Points | ACID")
-    # for i, acid in enumerate(bond_acid):
-    #     print(f"{i:2d} | {np.sum(bond_map == i):6d} | {acid:.3f}")
     plt.show()
     # 0, 3, 5, 7, 9, 1
