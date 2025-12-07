@@ -1,4 +1,5 @@
 # parser to read both NMR and NICS values from ORCA output
+from itertools import chain
 from networkx.algorithms import isomorphism
 from openbabel import openbabel as ob
 import os

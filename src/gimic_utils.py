@@ -201,18 +201,20 @@ def calculate_flux_through_plane_adaptive(
 
     # simple cache wrapper around vector_function to avoid re-evaluating same points
     # key by rounded coordinates (you may adapt precision)
-    @lru_cache(maxsize=100000)
-    def vf_cached(x, y, z):
-        return tuple(vector_function(float(x), float(y), float(z)))
+    # @lru_cache(maxsize=lru_maxcash)
+    # def vf_cached(x, y, z):
+    #     return tuple(vector_function(float(x), float(y), float(z)))
 
-    def vf_wrapper(x, y, z):
-        return vf_cached(round(x,9), round(y,9), round(z,9))
+    # def vf_wrapper(x, y, z):
+    #     return vf_cached(round(x,9), round(y,9), round(z,9))
 
     # recursive adaptive routine
     def recurse(s0, s1, t0, t1, depth):
         # coarse estimate (N) and fine estimate (2N)
-        f_coarse = _gl_on_subrect(vf_wrapper, center, u, v, s0, s1, t0, t1, normal, N)
-        f_fine = _gl_on_subrect(vf_wrapper, center, u, v, s0, s1, t0, t1, normal, 2*N)
+        # f_coarse = _gl_on_subrect(vf_wrapper, center, u, v, s0, s1, t0, t1, normal, N)
+        # f_fine = _gl_on_subrect(vf_wrapper, center, u, v, s0, s1, t0, t1, normal, 2*N)
+        f_coarse = _gl_on_subrect(vector_function, center, u, v, s0, s1, t0, t1, normal, N)
+        f_fine = _gl_on_subrect(vector_function, center, u, v, s0, s1, t0, t1, normal, 2*N)
 
         # error estimate
         err = abs(f_fine - f_coarse)
@@ -397,22 +399,22 @@ def integrate_acid_around_bond(acid_function, bond: ob.OBBond, spacing, R):
     return integral
 
 
-def calculate_bond_integrals(vti_data: vtk.vtkImageData, bonds: List[ob.OBBond]):
-    # extract data from vti data
-    xs, ys, zs, acid_grid, spacing = get_scalar_values(vti_data)
-    # extract atom coordinates from all bonds
-    ajr = []
-    for bond in bonds:
-        a1 = bond.GetBeginAtom()
-        a2 = bond.GetEndAtom()
-        ajr.append((
-            (a1.GetX(), a1.GetY(), a1.GetZ()),
-            (a2.GetX(), a2.GetY(), a2.GetZ())
-        ))
-    # assign each grid point to bond (using voronoi nearest neighbors algorithm)
-    bond_map = compute_bond_voronoi(xs, ys, zs, ajr)
-    # return bond integral values
-    return integrate_acid_per_bond_vtk(acid_grid, bond_map, spacing, len(bonds))
+# def calculate_bond_integrals(vti_data: vtk.vtkImageData, bonds: List[ob.OBBond]):
+#     # extract data from vti data
+#     xs, ys, zs, acid_grid, spacing = get_scalar_values(vti_data)
+#     # extract atom coordinates from all bonds
+#     ajr = []
+#     for bond in bonds:
+#         a1 = bond.GetBeginAtom()
+#         a2 = bond.GetEndAtom()
+#         ajr.append((
+#             (a1.GetX(), a1.GetY(), a1.GetZ()),
+#             (a2.GetX(), a2.GetY(), a2.GetZ())
+#         ))
+#     # assign each grid point to bond (using voronoi nearest neighbors algorithm)
+#     bond_map = compute_bond_voronoi(xs, ys, zs, ajr)
+#     # return bond integral values
+#     return integrate_acid_per_bond_vtk(acid_grid, bond_map, spacing, len(bonds))
 
 if __name__ == "__main__":
     import utils
