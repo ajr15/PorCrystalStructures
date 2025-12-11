@@ -237,6 +237,29 @@ def calculate_flux_through_plane_adaptive(
     total_flux = recurse(s_min, s_max, t_min, t_max, depth=0)
     return total_flux
 
+def cut_vti_data_to_box(vti_data: vtk.vtkImageData, xmin: float, xmax: float, ymin: float, ymax: float, zmin: float, zmax: float) -> vtk.vtkImageData:
+    # Extract the dimensions, origin, and spacing of the original VTI data
+    dims = vti_data.GetDimensions()
+    origin = vti_data.GetOrigin()
+    spacing = vti_data.GetSpacing()
+
+    # Calculate the indices corresponding to the box bounds
+    i_min = max(0, int((xmin - origin[0]) / spacing[0]))
+    i_max = min(dims[0] - 1, int((xmax - origin[0]) / spacing[0]))
+    j_min = max(0, int((ymin - origin[1]) / spacing[1]))
+    j_max = min(dims[1] - 1, int((ymax - origin[1]) / spacing[1]))
+    k_min = max(0, int((zmin - origin[2]) / spacing[2]))
+    k_max = min(dims[2] - 1, int((zmax - origin[2]) / spacing[2]))
+
+    # Extract the sub-image
+    extract = vtk.vtkExtractVOI()
+    extract.SetInputData(vti_data)
+    extract.SetVOI(i_min, i_max, j_min, j_max, k_min, k_max)
+    extract.Update()
+    return extract.GetOutput()
+
+
+
 def calculate_flux_through_bond(bond: ob.OBBond, vti_data: vtk.vtkImageData, surface_width: float, surface_height: float, n_gl: int=10):
     """
     Calculates the flux of a vector field through a bond.
@@ -249,6 +272,7 @@ def calculate_flux_through_bond(bond: ob.OBBond, vti_data: vtk.vtkImageData, sur
     Returns:
         float: The flux of the vector field through the bond.
     """
+
     # extract the vector function
     vector_function = get_vector_function(vti_data)
 

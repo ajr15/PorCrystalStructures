@@ -79,6 +79,19 @@ def calculate_bond_current_records(sid, mol: ob.OBMol, atom_mapper: dict, width,
                 res.extend(ajr)
     return res
 
+def build_macrocycle_box(mol: ob.OBMol, buffer: float):
+    atoms = get_macrocycle_atoms(mol)
+    coords = [mol.GetAtom(idx).GetVector() for idx in atoms.keys()]
+    x_coords = [coord.GetX() for coord in coords]
+    y_coords = [coord.GetY() for coord in coords]
+    z_coords = [coord.GetZ() for coord in coords]
+
+    min_x, max_x = min(x_coords), max(x_coords)
+    min_y, max_y = min(y_coords), max(y_coords)
+    min_z, max_z = min(z_coords), max(z_coords)
+
+    return min_x - buffer, max_x + buffer, min_y - buffer, max_y + buffer, min_z - buffer, max_z + buffer
+
 
 class Parser (StructureParser):
 
@@ -95,6 +108,7 @@ class Parser (StructureParser):
         mol = utils.get_molecule(mol_file)
         atom_mapper = get_macrocycle_atoms(mol)
         vti_data = gutils.read_vti_file(jvec_file)
+        vti_data = gutils.cut_vti_data_to_box(vti_data, *build_macrocycle_box(mol, 10))
         entries = []
         for width in self.widths:
             for height in self.heights:
