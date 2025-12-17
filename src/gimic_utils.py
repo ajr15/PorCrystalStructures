@@ -81,6 +81,74 @@ def get_scalar_values(vti_data: vtk.vtkImageData, scalar_name: str="scalars") ->
     return xs, ys, zs, grid, spacing
     
 
+# def get_vector_function(vti_data: vtk.vtkImageData, vector_name: str="vectors"):
+#     """
+#     Converts a vector field in the .vti file to a vector-valued function in 3D space
+#     using linear interpolation.
+    
+#     Args:
+#         vti_data (vtk.vtkImageData): The image data from the .vti file.
+#         vector_name (str): Name of the vector field.
+    
+#     Returns:
+#         function: A vector-valued function f(x, y, z) -> (vx, vy, vz).
+#     """
+#     vector_field = vti_data.GetPointData().GetArray(vector_name)
+#     if not vector_field:
+#         raise ValueError(f"Vector field '{vector_name}' not found in the .vti file.")
+    
+#     dims = vti_data.GetDimensions()
+#     origin = vti_data.GetOrigin()
+#     spacing = vti_data.GetSpacing()
+    
+#     x = np.linspace(origin[0], origin[0] + (dims[0] - 1) * spacing[0], dims[0])
+#     y = np.linspace(origin[1], origin[1] + (dims[1] - 1) * spacing[1], dims[1])
+#     z = np.linspace(origin[2], origin[2] + (dims[2] - 1) * spacing[2], dims[2])
+    
+#     vector_values = vtk_to_numpy(vector_field).reshape(dims + (-1,), order='F')
+#     interpolators = [RegularGridInterpolator((x, y, z), vector_values[..., i], bounds_error=True)
+#                      for i in range(vector_values.shape[-1])]
+    
+#     def vector_function(x, y, z):
+#         return tuple(interpolator((x, y, z)) for interpolator in interpolators)
+    
+#     return vector_function
+
+def get_closest_vector_value(vti_data: vtk.vtkImageData, x: float, y: float, z: float, vector_name: str="vectors"):
+    """
+    Finds the closest point in the VTI data grid to the given coordinates and returns its vector value.
+
+    Args:
+        vti_data (vtk.vtkImageData): The VTI data object.
+        x (float): X-coordinate of the point.
+        y (float): Y-coordinate of the point.
+        z (float): Z-coordinate of the point.
+
+    Returns:
+        tuple: The vector value (vx, vy, vz) at the closest grid point.
+    """
+    origin = np.array(vti_data.GetOrigin())
+    spacing = np.array(vti_data.GetSpacing())
+    dims = np.array(vti_data.GetDimensions())
+
+    # Calculate the indices of the closest grid point
+    indices = np.round((np.array([x, y, z]) - origin) / spacing).astype(int)
+
+    # Ensure indices are within bounds
+    indices = np.clip(indices, 0, dims - 1)
+
+    # Get the vector data
+    vector_array = vti_data.GetPointData().GetArray(vector_name)
+    if not vector_array:
+        raise ValueError("No vector data found in the VTI file.")
+
+    # Convert to numpy array and reshape to grid dimensions
+    vector_values = vti_data.GetPointData().GetArray(vector_name)
+    if not vector_values:
+        raise ValueError(f"Vector field '{vector_name}' not found in the .vti file.")
+    
+    return vector_values.GetTuple(indices[2] * dims[1] * dims[0] + indices[1] * dims[0] + indices[0])
+
 def get_vector_function(vti_data: vtk.vtkImageData, vector_name: str="vectors"):
     """
     Converts a vector field in the .vti file to a vector-valued function in 3D space
@@ -93,24 +161,9 @@ def get_vector_function(vti_data: vtk.vtkImageData, vector_name: str="vectors"):
     Returns:
         function: A vector-valued function f(x, y, z) -> (vx, vy, vz).
     """
-    vector_field = vti_data.GetPointData().GetArray(vector_name)
-    if not vector_field:
-        raise ValueError(f"Vector field '{vector_name}' not found in the .vti file.")
-    
-    dims = vti_data.GetDimensions()
-    origin = vti_data.GetOrigin()
-    spacing = vti_data.GetSpacing()
-    
-    x = np.linspace(origin[0], origin[0] + (dims[0] - 1) * spacing[0], dims[0])
-    y = np.linspace(origin[1], origin[1] + (dims[1] - 1) * spacing[1], dims[1])
-    z = np.linspace(origin[2], origin[2] + (dims[2] - 1) * spacing[2], dims[2])
-    
-    vector_values = vtk_to_numpy(vector_field).reshape(dims + (-1,), order='F')
-    interpolators = [RegularGridInterpolator((x, y, z), vector_values[..., i], bounds_error=True)
-                     for i in range(vector_values.shape[-1])]
     
     def vector_function(x, y, z):
-        return tuple(interpolator((x, y, z)) for interpolator in interpolators)
+        return get_closest_vector_value(vti_data, x, y, z, vector_name)
     
     return vector_function
 

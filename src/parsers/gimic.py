@@ -97,8 +97,10 @@ class Parser (StructureParser):
 
     name = "gimic"
     source_prefix = "gimic/"
-    widths = [1.5 + 0.5 * i for i in range(8)]
-    heights = [1.5 + 0.5 * i for i in range(8)]
+    # widths = [1.5 + 0.5 * i for i in range(8)]
+    # heights = [1.5 + 0.5 * i for i in range(8)]
+    widths = [3]
+    heights = [2]
 
     def parse_structure(self, session, sid):
         jvec_file = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", "gimic", "jvec.vti")
@@ -108,7 +110,6 @@ class Parser (StructureParser):
         mol = utils.get_molecule(mol_file)
         atom_mapper = get_macrocycle_atoms(mol)
         vti_data = gutils.read_vti_file(jvec_file)
-        vti_data = gutils.cut_vti_data_to_box(vti_data, *build_macrocycle_box(mol, 10))
         entries = []
         for width in self.widths:
             for height in self.heights:
