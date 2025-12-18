@@ -97,24 +97,27 @@ class Parser (StructureParser):
 
     name = "gimic"
     source_prefix = "gimic/"
-    # widths = [1.5 + 0.5 * i for i in range(8)]
-    # heights = [1.5 + 0.5 * i for i in range(8)]
-    widths = [3]
-    heights = [2]
+    widths = [1.5 + 0.5 * i for i in range(8)]
+    heights = [1.5 + 0.5 * i for i in range(8)]
+    # widths = [3]
+    # heights = [2]
 
     def parse_structure(self, session, sid):
-        jvec_file = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", "gimic", "jvec.vti")
-        if not os.path.exists(jvec_file):
-            return [], [f"INFO: No GIMIC calculation for {sid} ({jvec_file})"]
-        mol_file = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", "gimic", "mol.xyz")
-        mol = utils.get_molecule(mol_file)
-        atom_mapper = get_macrocycle_atoms(mol)
-        vti_data = gutils.read_vti_file(jvec_file)
-        entries = []
-        for width in self.widths:
-            for height in self.heights:
-                entries.extend(calculate_bond_current_records(sid, mol, atom_mapper, width, height, vti_data))
-        return entries, [] 
+        try:
+            jvec_file = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", "gimic", "jvec.vti")
+            if not os.path.exists(jvec_file):
+                return [], [f"INFO: No GIMIC calculation for {sid} ({jvec_file})"]
+            mol_file = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", "gimic", "mol.xyz")
+            mol = utils.get_molecule(mol_file)
+            atom_mapper = get_macrocycle_atoms(mol)
+            vti_data = gutils.read_vti_file(jvec_file)
+            entries = []
+            for width in self.widths:
+                for height in self.heights:
+                    entries.extend(calculate_bond_current_records(sid, mol, atom_mapper, width, height, vti_data))
+            return entries, [] 
+        except Exception:
+            return [], [f"ERROR: errors analyzing {sid}"]
 
     def parse(self, session, n):
         """Run the structure parser in parallel"""
