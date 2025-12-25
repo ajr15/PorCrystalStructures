@@ -1,11 +1,12 @@
+from typing import Tuple, Iterable
 import vtk
 import numpy as np
 from numpy.polynomial.legendre import leggauss
-from typing import List
 from scipy.interpolate import RegularGridInterpolator
 from openbabel import openbabel as ob
-from functools import lru_cache
+from scipy.optimize import minimize
 from vtkmodules.util.numpy_support import vtk_to_numpy
+from src import utils
 
 def read_vti_file(file_path) -> vtk.vtkImageData:
     """
@@ -21,40 +22,6 @@ def read_vti_file(file_path) -> vtk.vtkImageData:
     reader.SetFileName(file_path)
     reader.Update()
     return reader.GetOutput()
-
-def get_vti_bounds(vti_data: vtk.vtkImageData):
-    """
-    Extracts the bounds of the .vti data.
-
-    Args:
-        vti_data (vtk.vtkImageData): The image data from the .vti file.
-
-    Returns:
-        tuple: A tuple of ((xmin, xmax), (ymin, ymax), (zmin, zmax)).
-    """
-    origin = vti_data.GetOrigin()
-    spacing = vti_data.GetSpacing()
-    dims = vti_data.GetDimensions()
-
-    xmin = origin[0]
-    xmax = origin[0] + (dims[0] - 1) * spacing[0]
-    ymin = origin[1]
-    ymax = origin[1] + (dims[1] - 1) * spacing[1]
-    zmin = origin[2]
-    zmax = origin[2] + (dims[2] - 1) * spacing[2]
-
-    return ((xmin, xmax), (ymin, ymax), (zmin, zmax))
-
-
-def get_vti_grid(vti_data: vtk.vtkImageData):
-    dims = vti_data.GetDimensions()
-    origin = vti_data.GetOrigin()
-    spacing = vti_data.GetSpacing()
-    
-    x = np.linspace(origin[0], origin[0] + (dims[0] - 1) * spacing[0], dims[0])
-    y = np.linspace(origin[1], origin[1] + (dims[1] - 1) * spacing[1], dims[1])
-    z = np.linspace(origin[2], origin[2] + (dims[2] - 1) * spacing[2], dims[2])
-    return x, y, z
 
 
 def get_scalar_values(vti_data: vtk.vtkImageData, scalar_name: str="scalars") -> np.ndarray:
@@ -80,39 +47,6 @@ def get_scalar_values(vti_data: vtk.vtkImageData, scalar_name: str="scalars") ->
     # grid = flat.reshape(dims + (-1,), order='F')
     return xs, ys, zs, grid, spacing
     
-
-# def get_vector_function(vti_data: vtk.vtkImageData, vector_name: str="vectors"):
-#     """
-#     Converts a vector field in the .vti file to a vector-valued function in 3D space
-#     using linear interpolation.
-    
-#     Args:
-#         vti_data (vtk.vtkImageData): The image data from the .vti file.
-#         vector_name (str): Name of the vector field.
-    
-#     Returns:
-#         function: A vector-valued function f(x, y, z) -> (vx, vy, vz).
-#     """
-#     vector_field = vti_data.GetPointData().GetArray(vector_name)
-#     if not vector_field:
-#         raise ValueError(f"Vector field '{vector_name}' not found in the .vti file.")
-    
-#     dims = vti_data.GetDimensions()
-#     origin = vti_data.GetOrigin()
-#     spacing = vti_data.GetSpacing()
-    
-#     x = np.linspace(origin[0], origin[0] + (dims[0] - 1) * spacing[0], dims[0])
-#     y = np.linspace(origin[1], origin[1] + (dims[1] - 1) * spacing[1], dims[1])
-#     z = np.linspace(origin[2], origin[2] + (dims[2] - 1) * spacing[2], dims[2])
-    
-#     vector_values = vtk_to_numpy(vector_field).reshape(dims + (-1,), order='F')
-#     interpolators = [RegularGridInterpolator((x, y, z), vector_values[..., i], bounds_error=True)
-#                      for i in range(vector_values.shape[-1])]
-    
-#     def vector_function(x, y, z):
-#         return tuple(interpolator((x, y, z)) for interpolator in interpolators)
-    
-#     return vector_function
 
 def get_closest_vector_value(vti_data: vtk.vtkImageData, x: float, y: float, z: float, vector_name: str="vectors"):
     """
@@ -207,12 +141,16 @@ def _gl_on_subrect(vector_function, center, u, v, s0, s1, t0, t1, normal, N):
     jac = np.linalg.norm(np.cross(u, v))
     return flux * jac
 
-def calculate_flux_through_plane_adaptive(
+def calculate_flux_through_plane(
     vector_function,
     center,
-    width,
-    height,
     normal,
+    s_min,
+    s_max,
+    t_min,
+    t_max,
+    u,
+    v,
     N=8,
     tol_rel=1e-3,
     tol_abs=0.0,
@@ -220,52 +158,33 @@ def calculate_flux_through_plane_adaptive(
 ):
     """
     Adaptive GL quadrature over rectangular plane.
+
     Args:
-        vector_function: f(x,y,z)->(Jx,Jy,Jz)
-        center: 3-array, rectangle center in 3D
-        width: total width along u (float)
-        height: total height along v (float)
-        normal: plane normal (3-array)
-        N: base GL order (int) used per subrectangle
-        tol_rel: relative tolerance for local error
-        tol_abs: absolute tolerance for local error
-        max_depth: maximum subdivision depth
+        vector_function (function): A vector-valued function f(x, y, z) -> (Jx, Jy, Jz).
+        center (array-like): 3D coordinates of the rectangle center.
+        normal (array-like): Normal vector of the plane.
+        s_min (float): Minimum value of the s-coordinate along the u direction.
+        s_max (float): Maximum value of the s-coordinate along the u direction.
+        t_min (float): Minimum value of the t-coordinate along the v direction.
+        t_max (float): Maximum value of the t-coordinate along the v direction.
+        u (array-like): Vector defining the u direction in the plane.
+        v (array-like): Vector defining the v direction in the plane.
+        N (int, optional): Base Gauss-Legendre order used per subrectangle. Default is 8.
+        tol_rel (float, optional): Relative tolerance for local error. Default is 1e-3.
+        tol_abs (float, optional): Absolute tolerance for local error. Default is 0.0.
+        max_depth (int, optional): Maximum subdivision depth. Default is 6.
+
     Returns:
-        flux (float)
+        float: The computed flux through the plane.
     """
 
     center = np.array(center, float)
     normal = np.array(normal, float)
     normal /= np.linalg.norm(normal)
 
-    # build robust u,v basis in plane
-    tmp = np.array([1.0, 0.0, 0.0])
-    if np.allclose(normal, tmp):
-        tmp = np.array([0.0, 1.0, 0.0])
-
-    u = np.cross(normal, tmp)
-    u /= np.linalg.norm(u)
-    v = np.cross(normal, u)
-    v /= np.linalg.norm(v)
-
-    # s,t ranges relative to center
-    s_min, s_max = -0.5 * width, 0.5 * width
-    t_min, t_max = -0.5 * height, 0.5 * height
-
-    # simple cache wrapper around vector_function to avoid re-evaluating same points
-    # key by rounded coordinates (you may adapt precision)
-    # @lru_cache(maxsize=lru_maxcash)
-    # def vf_cached(x, y, z):
-    #     return tuple(vector_function(float(x), float(y), float(z)))
-
-    # def vf_wrapper(x, y, z):
-    #     return vf_cached(round(x,9), round(y,9), round(z,9))
-
     # recursive adaptive routine
     def recurse(s0, s1, t0, t1, depth):
         # coarse estimate (N) and fine estimate (2N)
-        # f_coarse = _gl_on_subrect(vf_wrapper, center, u, v, s0, s1, t0, t1, normal, N)
-        # f_fine = _gl_on_subrect(vf_wrapper, center, u, v, s0, s1, t0, t1, normal, 2*N)
         f_coarse = _gl_on_subrect(vector_function, center, u, v, s0, s1, t0, t1, normal, N)
         f_fine = _gl_on_subrect(vector_function, center, u, v, s0, s1, t0, t1, normal, 2*N)
 
@@ -290,44 +209,59 @@ def calculate_flux_through_plane_adaptive(
     total_flux = recurse(s_min, s_max, t_min, t_max, depth=0)
     return total_flux
 
-def cut_vti_data_to_box(vti_data: vtk.vtkImageData, xmin: float, xmax: float, ymin: float, ymax: float, zmin: float, zmax: float) -> vtk.vtkImageData:
-    # Extract the dimensions, origin, and spacing of the original VTI data
-    dims = vti_data.GetDimensions()
-    origin = vti_data.GetOrigin()
-    spacing = vti_data.GetSpacing()
+def find_plane_limits(mol: ob.OBMol, bond: ob.OBBond, width: float, height: float, u: np.ndarray, v: np.ndarray) -> tuple:
+    atom1 = bond.GetBeginAtom()
+    atom2 = bond.GetEndAtom()
+    start = np.array([atom1.GetX(), atom1.GetY(), atom1.GetZ()])
+    end = np.array([atom2.GetX(), atom2.GetY(), atom2.GetZ()])
 
-    # Calculate the indices corresponding to the box bounds
-    i_min = max(0, int((xmin - origin[0]) / spacing[0]))
-    i_max = min(dims[0] - 1, int((xmax - origin[0]) / spacing[0]))
-    j_min = max(0, int((ymin - origin[1]) / spacing[1]))
-    j_max = min(dims[1] - 1, int((ymax - origin[1]) / spacing[1]))
-    k_min = max(0, int((zmin - origin[2]) / spacing[2]))
-    k_max = min(dims[2] - 1, int((zmax - origin[2]) / spacing[2]))
+    # Calculate the bond's center and direction
+    center = (start + end) / 2
+    bond_vector = end - start
+    normal = bond_vector / np.linalg.norm(bond_vector)
+    u = np.array(u)
+    v = np.array(v)
 
-    # Extract the sub-image
-    extract = vtk.vtkExtractVOI()
-    extract.SetInputData(vti_data)
-    extract.SetVOI(i_min, i_max, j_min, j_max, k_min, k_max)
-    extract.Update()
-    return extract.GetOutput()
+    close_atoms = []
+    close_radiuses = []
+
+    # Iterate over all atoms in the molecule
+    for atom in ob.OBMolAtomIter(mol):
+        if atom in [atom1, atom2]: 
+            continue
+        atom_pos = np.array([atom.GetX(), atom.GetY(), atom.GetZ()])
+        relative_pos = atom_pos - center
+
+        # Project the atom position onto the u and v directions
+        distance = np.abs(np.dot(relative_pos, normal))
+        r = ob.GetCovalentRad(atom.GetAtomicNum())
+        if distance < r:
+            s, t = np.dot(relative_pos, v), np.dot(relative_pos, u)
+            r = np.sqrt(r ** 2 - distance ** 2) # fix radius of cut sphere (pythagorian theorem)
+            close_atoms.append((s, t))
+            close_radiuses.append(r)
+
+    proj_center = (0, 0) # the center is always at the origin of the plane
+
+    return assign_rectangle_edges(close_atoms, close_radiuses, proj_center, width, height)
 
 
-
-def calculate_flux_through_bond(bond: ob.OBBond, vti_data: vtk.vtkImageData, surface_width: float, surface_height: float, n_gl: int=10):
+def calculate_flux_through_bond(mol: ob.OBMol, bond: ob.OBBond, vti_data: vtk.vtkImageData, surface_width: float, surface_height: float, n_gl: int=10):
     """
     Calculates the flux of a vector field through a bond.
 
     Args:
+        mol (ob.OBMol): The molecule containing the bond.
         bond (ob.OBBond): An OpenBabel bond object.
-        vti_file (str): Path to the .vti file containing the vector field.
-        bond_radius (flat): Radius of bond to calcualte flux
+        vti_data (vtk.vtkImageData): The VTI data containing the vector field.
+        surface_width (float): Width of the integration surface.
+        surface_height (float): Height of the integration surface.
+        n_gl (int): Gauss-Legendre order for integration.
 
     Returns:
         float: The flux of the vector field through the bond.
     """
 
-    # extract the vector function
-    vector_function = get_vector_function(vti_data)
 
     # Get the bond's start and end points
     atom1 = bond.GetBeginAtom()
@@ -337,11 +271,39 @@ def calculate_flux_through_bond(bond: ob.OBBond, vti_data: vtk.vtkImageData, sur
 
     # Calculate the bond's center and direction
     center = (start + end) / 2
-    direction = end - start
-    normal = direction / np.linalg.norm(direction)
+    bond_vector = end - start
+    bond_vector = bond_vector / np.linalg.norm(bond_vector)
+    
+    macrocycle_norm, _, _ = utils.find_macrocyle_plane_vectors(mol, "porphyrins")
+    macrocycle_norm /= np.linalg.norm(macrocycle_norm)
+
+    # Find vector roughly in the macrocycle plane orthogonal to both bond_vector and macrocycle normal
+    v = np.cross(bond_vector, macrocycle_norm)
+    v /= np.linalg.norm(v)
+    # find vector orthogonal to the macrocycle plane and the bond vector
+    u = np.cross(bond_vector, v)
+    u /= np.linalg.norm(u)
+
+
+    # find required integration bounds (s and t) to avoid overlap with neighboring atoms
+    smin, smax, tmin, tmax = find_plane_limits(mol, bond, surface_width, surface_height, u, v)
+
+    # Extract the vector function
+    vector_function = get_vector_function(vti_data)
 
     # Calculate the flux through the bond
-    return calculate_flux_through_plane_adaptive(vector_function, center, surface_width, surface_height, normal, N=n_gl)
+    return calculate_flux_through_plane(
+        vector_function,
+        center,
+        bond_vector, # Normal to the plane
+        smin,
+        smax,
+        tmin,
+        tmax,
+        u,
+        v,
+        N=n_gl
+    )
 
 # ======= ANALYZE ACID OUTPUT =======
 
@@ -424,7 +386,7 @@ def create_acid_interpolator(acid_grid, xs, ys, zs):
 
     return acid_function
 
-def integrate_acid_around_bond(acid_function, bond: ob.OBBond, spacing, R):
+def integrate_acid_around_bond(acid_function, bond: ob.OBBond, spacing: float, R: float, nuclie_distance: float):
     """
     Integrates the ACID values around a bond within a cylindrical region of radius R.
 
@@ -443,6 +405,18 @@ def integrate_acid_around_bond(acid_function, bond: ob.OBBond, spacing, R):
     a = np.array([atom1.GetX(), atom1.GetY(), atom1.GetZ()])
     c = np.array([atom2.GetX(), atom2.GetY(), atom2.GetZ()])
 
+    ab = c - a
+    ab_norm = np.linalg.norm(ab)
+    ab_unit = ab / ab_norm
+
+    if ab_norm < nuclie_distance * 2:
+        raise ValueError("Cannot take distance larger than bond length!")
+
+    # take distance from each atom nucleaus
+    a = a + ab_unit * nuclie_distance
+    c = c - ab_unit * nuclie_distance
+    
+    # recalculate
     ab = c - a
     ab_norm = np.linalg.norm(ab)
     ab_unit = ab / ab_norm
@@ -476,97 +450,134 @@ def integrate_acid_around_bond(acid_function, bond: ob.OBBond, spacing, R):
     return integral
 
 
-# def calculate_bond_integrals(vti_data: vtk.vtkImageData, bonds: List[ob.OBBond]):
-#     # extract data from vti data
-#     xs, ys, zs, acid_grid, spacing = get_scalar_values(vti_data)
-#     # extract atom coordinates from all bonds
-#     ajr = []
-#     for bond in bonds:
-#         a1 = bond.GetBeginAtom()
-#         a2 = bond.GetEndAtom()
-#         ajr.append((
-#             (a1.GetX(), a1.GetY(), a1.GetZ()),
-#             (a2.GetX(), a2.GetY(), a2.GetZ())
-#         ))
-#     # assign each grid point to bond (using voronoi nearest neighbors algorithm)
-#     bond_map = compute_bond_voronoi(xs, ys, zs, ajr)
-#     # return bond integral values
-#     return integrate_acid_per_bond_vtk(acid_grid, bond_map, spacing, len(bonds))
+Point = Tuple[float, float]
 
-if __name__ == "__main__":
-    import utils
-    from openbabel import openbabel as ob
-    import matplotlib.pyplot as plt
+def assign_rectangle_edges(
+    points: Iterable[Point],
+    point_radiuses: Iterable[float],
+    center: Point,
+    width: float,
+    height: float,
+    ntrails: int=100
+):
+    """
+    Assign L, R, B, T such that:
+    - R - L = width
+    - T - B = height
+    - rectangle contains `center`
+    - rectangle contains no forbidden points
 
-    acid_vti_file = "data/test/benzene/hr_acid.vti"
-    vti_data = read_vti_file(acid_vti_file)
-    xs, ys, zs, acid_grid, spacing = get_scalar_values(vti_data)
-    mol = utils.get_molecule("data/test/benzene/mol.xyz")
-    for _ in range(2):
-        mol.DeleteAtom(mol.GetAtom(mol.NumAtoms()))
-    # 2. Define bonds as ((x1,y1,z1),(x2,y2,z2)) list
-    bonds = []
-    for bond in ob.OBMolBondIter(mol):
-        a1 = bond.GetBeginAtom()
-        a2 = bond.GetEndAtom()
-        # if a1.GetAtomicNum() == 6 and a2.GetAtomicNum() == 6:
-        bonds.append((
-            (a1.GetX(), a1.GetY(), a1.GetZ()),
-            (a2.GetX(), a2.GetY(), a2.GetZ())
+    Raises ValueError if impossible.
+    """
+
+    xc, yc = center
+    W, H = width, height
+
+    # Feasible ranges from center constraint
+    L_min, L_max = xc - W, xc
+    B_min, B_max = yc - H, yc
+
+    # Forbidden rectangles in (L, B) space
+    forbidden = []
+    for x, y in points:
+        forbidden.append((
+            x - W, x,      # L interval
+            y - H, y       # B interval
         ))
 
+    # Objective: make the center point closest to the center of the rectangle
+    def objective(x):
+        L, B = x
+        return (L + W/2 - xc)**2 + (B + H/2 - yc)**2
 
+    # Constraints: L in [L_min, L_max], B in [B_min, B_max]
+    bounds = [(L_min, L_max), (B_min, B_max)]
+
+    # Forbidden regions: for each forbidden rectangle, (L, B) must be outside
+    def make_forbidden_constraint(Lf0, Lf1, Bf0, Bf1, radius):
+        # Returns a constraint function that is positive if (L, B) is outside the forbidden rectangle (expanded by radius)
+        def constraint(x):
+            L, B = x
+            # Expand the forbidden rectangle by 'radius' in all directions
+            Lf0_exp = Lf0 - radius
+            Lf1_exp = Lf1 + radius
+            Bf0_exp = Bf0 - radius
+            Bf1_exp = Bf1 + radius
+            # At least one of these must be true: L <= Lf0_exp or L >= Lf1_exp or B <= Bf0_exp or B >= Bf1_exp
+            # So, we require max(L-Lf0_exp, Lf1_exp-L, B-Bf0_exp, Bf1_exp-B) >= 0 for being outside
+            return max(L-Lf1_exp, Lf0_exp-L, B-Bf1_exp, Bf0_exp-B)
+        return constraint
+
+    constraints = []
+    for (Lf0, Lf1, Bf0, Bf1), radius in zip(forbidden, point_radiuses):
+        constraints.append({'type': 'ineq', 'fun': make_forbidden_constraint(Lf0, Lf1, Bf0, Bf1, radius)})
+
+    for _ in range(ntrails):
+        # random initial guess within the bounds
+        x0 = [L_min + np.random.rand() * W, B_min + np.random.rand() * H]
+
+        res = minimize(
+            objective,
+            x0,
+            bounds=bounds,
+            constraints=constraints,
+            method="SLSQP",
+            options={"maxiter": 1e6, "ftol": 1e-9, "disp": False}
+        )
+
+        if not res.success:
+            continue
+
+        best_L, best_B = res.x
+
+        return best_L, best_L + W, best_B, best_B + H
+    else:
+        raise ValueError("Cannot find rectangle!")
+
+
+
+if __name__ == "__main__":
+    from src import config
+    import os
+    from matplotlib import pyplot as plt
+    mol_file = os.path.join(config.DATA_DIR, "xyz", "dft", "ATUSOX" + "_0.xyz")
+    mol = utils.get_molecule(mol_file)
+    bond = mol.GetBond(18, 19)
+
+    # Get the bond's start and end points
+    atom1 = bond.GetBeginAtom()
+    atom2 = bond.GetEndAtom()
+    start = np.array([atom1.GetX(), atom1.GetY(), atom1.GetZ()])
+    end = np.array([atom2.GetX(), atom2.GetY(), atom2.GetZ()])
+
+    # Calculate the bond's center and direction
+    center = (start + end) / 2
+    bond_vector = end - start
+    bond_vector = bond_vector / np.linalg.norm(bond_vector)
     
+    macrocycle_norm, _, _ = utils.find_macrocyle_plane_vectors(mol, "porphyrins")
+    macrocycle_norm /= np.linalg.norm(macrocycle_norm)
 
-    # Extract points where z=0
-    z_index = np.argmin(np.abs(zs))  # Find the index where z is closest to 0
-    xy_points = np.column_stack([np.repeat(xs, len(ys)), np.tile(ys, len(xs))])
-    acid_values = acid_grid[:, :, z_index].ravel()
+    # Find vector roughly in the macrocycle plane orthogonal to both bond_vector and macrocycle normal
+    v = np.cross(bond_vector, macrocycle_norm)
+    v /= np.linalg.norm(v)
+    # find vector orthogonal to the macrocycle plane and the bond vector
+    u = np.cross(bond_vector, v)
+    u /= np.linalg.norm(u)
 
-    # Create a scatter plot
-    plt.figure(figsize=(10, 8))
-    scatter = plt.scatter(xy_points[:, 0], xy_points[:, 1], c=acid_values, cmap='Oranges', s=10)
-    plt.colorbar(scatter, label="Bond Assignment")
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.title("2D Plot of Points Colored by Bond Assignment (z=0)")
-    # Plot the bonds as lines
-    for i, (a, b) in enumerate(bonds):
-        a = np.array(a)
-        b = np.array(b)
-        plt.plot([a[0], b[0]], [a[1], b[1]], color='black', linewidth=2)
-        # Calculate the midpoint of the bond
-        midpoint = (a + b) / 2
-        # Annotate the bond index at the midpoint
-        # plt.text(midpoint[0], midpoint[1], str(i), color='red', fontsize=12, ha='center', va='center')
+    l, r, b, t = find_plane_limits(mol, bond, 5, 10, u, v)
+    
+    # adds hydrogen atoms to the molecule on the rectangle edges
+    borders = [(l, b), (l, t), (r, b), (r, t)]
+    for x, y in borders:
+        coords = center + v * x + u * y
+        hydrogen = ob.OBAtom()
+        hydrogen.SetAtomicNum(1)
+        hydrogen.SetVector(coords[0], coords[1], coords[2])
+        mol.AddAtom(hydrogen)
+    out_file = "test.xyz"
+    obConversion = ob.OBConversion()
+    obConversion.SetOutFormat("xyz")
+    obConversion.WriteFile(mol, out_file)
 
-    # bond_acid = calculate_bond_integrals(vti_data, list(ob.OBMolBondIter(mol)))
-    # for i, acid in enumerate(bond_acid):
-    #     print(f"{i:2d} | {acid:.4f}")
 
-    acid_func = create_acid_interpolator(acid_grid, xs, ys, zs)
-    acids = []
-    for bond in ob.OBMolBondIter(mol):
-        acids.append(integrate_acid_around_bond(acid_func, bond, spacing, R=1))
-    print(acids)
-
-    # # Create a figure to visualize bonds colored by their ACID value
-    # plt.figure(figsize=(10, 8))
-    # norm = plt.Normalize(vmin=np.min(bond_acid), vmax=np.max(bond_acid))
-    # cmap = plt.cm.Greens
-
-    # for i, (a, b) in enumerate(bonds):
-    #     a = np.array(a)
-    #     b = np.array(b)
-    #     color = cmap(norm(bond_acid[i]))
-    #     plt.plot([a[0], b[0]], [a[1], b[1]], color=color, linewidth=4)
-
-    # sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    # sm.set_array([])
-    # plt.colorbar(sm, label="ACID Value", ax=plt.gca())
-    # plt.xlabel("X")
-    # plt.ylabel("Y")
-    # plt.title("Bonds Colored by ACID Value")
-    # print(f"Bond | Points | ACID")
-    plt.show()
-    # 0, 3, 5, 7, 9, 1

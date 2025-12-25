@@ -31,14 +31,6 @@ def get_metal_idx(mol: ob.OBMol, macrocycle_atoms) -> int:
 
 def get_macrocycle_atoms(mol: ob.OBMol):
     """Get the atoms involved in the macrocycle, including the metal center."""
-    # Remove all hydrogen atoms
-    while True:
-        for atom in ob.OBMolAtomIter(mol):
-            if atom.GetAtomicNum() == 1:
-                mol.DeleteAtom(atom)
-                break
-        else:
-            break
     # get mapper and add metal idx
     mol.ConnectTheDots()
     atom_mapper = find_structure_indices(mol)[0]
@@ -58,7 +50,7 @@ def calculate_bond_current_records(sid, mol: ob.OBMol, atom_mapper: dict, width,
             if nbr_idx in atom_mapper.keys() and atom_idx < nbr_idx:
                 bond = mol.GetBond(atom_obj.GetIdx(), nbr.GetIdx())
                 integral = gutils.calculate_flux_through_bond(
-                    bond, data, width, height
+                    mol, bond, data, width, height
                 )
                 begin= atom_mapper[bond.GetBeginAtomIdx()] 
                 end = atom_mapper[bond.GetEndAtomIdx()]  
@@ -107,14 +99,19 @@ class Parser (StructureParser):
             jvec_file = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", "gimic", "jvec.vti")
             if not os.path.exists(jvec_file):
                 return [], [f"INFO: No GIMIC calculation for {sid} ({jvec_file})"]
-            mol_file = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", "gimic", "mol.xyz")
+            mol_file = os.path.join(config.DATA_DIR, "xyz", "dft", sid + "_0.xyz")
+            if not os.path.exists(mol_file):
+                return [], [f"INFO: No geometry file for {sid} ({mol_file})"]
             mol = utils.get_molecule(mol_file)
             atom_mapper = get_macrocycle_atoms(mol)
             vti_data = gutils.read_vti_file(jvec_file)
             entries = []
             for width in self.widths:
                 for height in self.heights:
-                    entries.extend(calculate_bond_current_records(sid, mol, atom_mapper, width, height, vti_data))
+                    try:
+                        entries.extend(calculate_bond_current_records(sid, mol, atom_mapper, width, height, vti_data))
+                    except ValueError: 
+                        continue
             return entries, [] 
         except Exception:
             return [], [f"ERROR: errors analyzing {sid}"]
@@ -145,10 +142,16 @@ class Parser (StructureParser):
 if __name__ == "__main__":
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
+    import pandas as pd
     engine = create_engine('sqlite:///main.db')
     Session = sessionmaker(bind=engine)
     session = Session()
     parser = Parser()
     entries, _ = parser.parse_structure(session, "ATEWUT")
+    print(_)
+    data = []
     for entry in entries:
         print(entry.structure, entry.property, entry.value, entry.source)
+        data.append([entry.structure, entry.property, entry.value, entry.source])
+    df = pd.DataFrame(data, columns=["structure", "property", "value", "source"])
+    df.to_csv("test.csv")

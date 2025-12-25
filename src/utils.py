@@ -198,6 +198,31 @@ def find_structure_indices(obmol: ob.OBMol, structure: str):
             isos.append(atoms)
     return isos
 
+def find_macrocyle_plane_vectors(obmol: ob.OBMol, structure: str):
+    # Get the macrocycle atom indices
+    macrocycle_indices = find_structure_indices(obmol, structure)
+    if not macrocycle_indices:
+        raise ValueError(f"No macrocycle structure found for {structure}")
+
+    # Extract the coordinates of the macrocycle atoms
+    macrocycle_coords = []
+    for idx in macrocycle_indices[0]:
+        atom = obmol.GetAtom(idx)
+        macrocycle_coords.append([atom.GetX(), atom.GetY(), atom.GetZ()])
+
+    # Perform Singular Value Decomposition (SVD) to fit a plane
+    macrocycle_coords = np.array(macrocycle_coords)
+    centroid = np.mean(macrocycle_coords, axis=0)
+    centered_coords = macrocycle_coords - centroid
+    _, _, vh = np.linalg.svd(centered_coords)
+
+    # The normal vector is the last row of vh
+    normal_vector = vh[-1]
+    plane_vector1 = vh[0]
+    plane_vector2 = vh[1]
+
+    return normal_vector, plane_vector1, plane_vector2
+
 
 def validate_structure(obmol: ob.OBMol, structure: str, n_isomorphs: int=1) -> bool:
     isos = find_structure_indices(obmol, structure)

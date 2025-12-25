@@ -66,15 +66,14 @@ def get_macrocycle_bonds(mol: ob.OBMol):
 
 
 
-def calculate_acid_records(sid, atom_mapper: dict, bonds, radius: float, data):
+def calculate_acid_records(sid, atom_mapper: dict, bonds, radius: float, distance: float, data):
     """Calculate bond integrals for bonds within the macrocycle."""
     res = []
     xs, ys, zs, acid_grid, spacing = gutils.get_scalar_values(data)
     acid_func = gutils.create_acid_interpolator(acid_grid, xs, ys, zs)
-    acids = {}
     for bond in bonds:
         acid = gutils.integrate_acid_around_bond(
-            acid_func, bond, spacing, radius
+            acid_func, bond, spacing, radius, distance
         )
         begin = atom_mapper[bond.GetBeginAtomIdx()] 
         end = atom_mapper[bond.GetEndAtomIdx()]  
@@ -83,13 +82,13 @@ def calculate_acid_records(sid, atom_mapper: dict, bonds, radius: float, data):
                 structure=sid, 
                 property=f"mapped/{begin}->{end}",
                 value=acid,
-                source=f"radius={radius}"
+                source=f"radius={radius}&distance={distance}"
             ),
             StructureProperty(
                 structure=sid, 
                 property=f"original/{bond.GetBeginAtomIdx()}->{bond.GetEndAtomIdx()}",
                 value=acid,
-                source=f"radius={radius}"
+                source=f"radius={radius}&distance={distance}"
             )
         ]
         res.extend(ajr)
@@ -101,6 +100,7 @@ class Parser (StructureParser):
     name = "acid"
     source_prefix = "acid/"
     radii = [0.5 + 0.5 * i for i in range(8)]
+    distances = [0.1 * i for i in range(8)]
 
     def parse_structure(self, session, sid):
         jvec_file = os.path.join(config.DATA_DIR, "nmr", sid + "_0_out", "gimic", "acid.vti")
@@ -113,7 +113,11 @@ class Parser (StructureParser):
         vti_data = gutils.read_vti_file(jvec_file)
         entries = []
         for r in self.radii:
-            entries.extend(calculate_acid_records(sid, atom_mapper, bonds, r, vti_data))
+            for dist in self.distances:
+                try:
+                    entries.extend(calculate_acid_records(sid, atom_mapper, bonds, r, dist, vti_data))
+                except ValueError:
+                    continue
         return entries, [] 
 
 if __name__ == "__main__":
