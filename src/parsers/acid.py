@@ -110,7 +110,7 @@ class Parser (StructureParser):
         mol = utils.get_molecule(mol_file)
         atom_mapper = get_macrocycle_atoms(mol)
         bonds = get_macrocycle_bonds(mol)
-        vti_data = gutils.read_vti_file(jvec_file)
+        vti_data = gutils.read_vti_file(jvec_file, timeout=60 * 60)
         entries = []
         for r in self.radii:
             for dist in self.distances:

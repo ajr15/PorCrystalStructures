@@ -104,7 +104,7 @@ class Parser (StructureParser):
                 return [], [f"INFO: No geometry file for {sid} ({mol_file})"]
             mol = utils.get_molecule(mol_file)
             atom_mapper = get_macrocycle_atoms(mol)
-            vti_data = gutils.read_vti_file(jvec_file)
+            vti_data = gutils.read_vti_file(jvec_file, timeout=60 * 60)
             entries = []
             for width in self.widths:
                 for height in self.heights:
