@@ -1,3 +1,4 @@
+import threading
 from typing import Tuple, Iterable
 import vtk
 import numpy as np
@@ -8,20 +9,40 @@ from scipy.optimize import minimize
 from vtkmodules.util.numpy_support import vtk_to_numpy
 from src import utils
 
-def read_vti_file(file_path) -> vtk.vtkImageData:
+def read_vti_file(file_path, timeout=None) -> vtk.vtkImageData:
     """
     Reads a .vti file and returns the vtkImageData object.
-    
+
     Args:
         file_path (str): Path to the .vti file.
-    
+        timeout (float, optional): Timeout in seconds for reading the file.
+
     Returns:
         vtk.vtkImageData: The image data from the .vti file.
+
+    Raises:
+        TimeoutError: If reading the file takes longer than the specified timeout.
     """
-    reader = vtk.vtkXMLImageDataReader()
-    reader.SetFileName(file_path)
-    reader.Update()
-    return reader.GetOutput()
+    result = {}
+    exception = {}
+
+    def worker():
+        try:
+            reader = vtk.vtkXMLImageDataReader()
+            reader.SetFileName(file_path)
+            reader.Update()
+            result['output'] = reader.GetOutput()
+        except Exception as e:
+            exception['error'] = e
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise TimeoutError(f"Reading VTI file exceeded timeout of {timeout} seconds.")
+    if 'error' in exception:
+        raise exception['error']
+    return result['output']
 
 
 def get_scalar_values(vti_data: vtk.vtkImageData, scalar_name: str="scalars") -> np.ndarray:
@@ -537,8 +558,20 @@ def assign_rectangle_edges(
 
 
 if __name__ == "__main__":
-    from src import config
     import os
+    from src import config
+    vti_file = os.path.join(config.DATA_DIR, "nmr", "ATUSOX_0_out", "gimic", "acid.vti")
+    res = None
+    print("starting to read...")
+    try:
+        res = read_vti_file(vti_file, 60 * 20)
+    except TimeoutError:
+        print("HEY! i had a timout error")
+    print("HEY! i finished normally")
+    print(res)
+    import sys; sys.exit()
+    
+    
     from matplotlib import pyplot as plt
     mol_file = os.path.join(config.DATA_DIR, "xyz", "dft", "ATUSOX" + "_0.xyz")
     mol = utils.get_molecule(mol_file)
