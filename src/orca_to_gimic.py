@@ -5,6 +5,8 @@ import os
 from GimicBasisSet import SHELL, BasisSet
 import utils
 from openbabel import openbabel as ob
+from torinax.io import OrcaIn
+from torinax.utils.openbabel import molecule_to_obmol
 
 
 GIMIC_INPUT_TEXT = """
@@ -201,11 +203,12 @@ def determine_grid(coords: np.ndarray) -> tuple:
     return origin, grid_x_vec / np.linalg.norm(grid_x_vec), grid_y_vec / np.linalg.norm(grid_y_vec), grid_z_vec / np.linalg.norm(grid_z_vec), lengths
 
 def determine_magnetic_field(fname: str):
-    xyz_path = os.path.splitext(fname)[0] + ".xyz"
     # count number of ghost atoms
     with open(fname, "r") as file:
         nghosts = sum(1 for line in file if line.startswith("H:"))
-    mol = utils.get_molecule(xyz_path)
+    # read geometry from input file
+    infile = OrcaIn(fname)
+    mol = molecule_to_obmol(infile.read_specie())
     # removes the ghost atoms from molecule
     for _ in range(nghosts):
         mol.DeleteAtom(mol.GetAtom(mol.NumAtoms()))
@@ -224,11 +227,8 @@ def write_gimic_files(densities, basisset, xdens_path, mol_path):
     # write basis set
     basisset.write_MOL(filename=mol_path, coords=None, turbomole=False)
 
-def convert(orca_2json_path: str, fname: str, grid_spacing: int):
+def convert(gimic_comp_dir: str, orca_2json_path: str, fname: str, grid_spacing: int):
     # setup
-    gimic_comp_dir = os.path.join(os.path.dirname(fname), "gimic")
-    if not os.path.isdir(gimic_comp_dir):
-        os.mkdir(gimic_comp_dir)
     xdens_path = os.path.join(gimic_comp_dir, "XDENS")
     mol_path = os.path.join(gimic_comp_dir, "MOL")
     gimic_input_path = os.path.join(gimic_comp_dir, "gimic.inp")
@@ -260,11 +260,19 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Convert ORCA NMR output file to GIMIC input.")
     parser.add_argument("input_file", type=str, help="Path to the ORCA input file.")
+    parser.add_argument("--gimic_dir", type=str, default=None, help="Path of GIMIC directory (to create/exiting). defaults to make 'gimic' directory in input file's direcotry")
     parser.add_argument("--grid_spacing", type=float, default=0.1, help="Grid spacing for GIMIC input (default: 0.1).")
     parser.add_argument("--orca_2json_path", type=str, default="~/Software/ORCA5/orca_2json", help="Path to orca_2json executable (default: ~/Software/ORCA5/orca_2json).")
 
     # Parse arguments
     args = parser.parse_args()
 
+    # parse & create gimic dir
+    gimic_dir = args.gimic_dir
+    if gimic_dir is None:
+        gimic_dir = os.path.join(os.path.dirname(args.input_file), "gimic")
+    if not os.path.isdir(gimic_dir):
+        os.mkdir(gimic_dir)
+
     # Call the convert function with parsed arguments
-    convert(args.orca_2json_path, args.input_file, args.grid_spacing)
+    convert(gimic_dir, args.orca_2json_path, args.input_file, args.grid_spacing)
