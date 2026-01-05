@@ -10,7 +10,7 @@ PREFIX="CRYSTAL"
 export ${PREFIX}_SRC_DIR="$PROJECT_SRC_DIR"
 
 # Step 4: Add the "src" directory of the project to the PYTHONPATH
-export PYTHONPATH="$PROJECT_SRC_DIR/src:$PYTHONPATH"
+export PYTHONPATH="$PROJECT_SRC_DIR/src:$PROJECT_SRC_DIR:$PYTHONPATH"
 
 # Step 5: Set up the "data_dir" environment variable based on the project source directory
 export ${PREFIX}_DATA_DIR="$PROJECT_SRC_DIR/data"
