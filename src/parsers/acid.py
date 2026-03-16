@@ -4,7 +4,7 @@ from openbabel import openbabel as ob
 import os
 from src.sqlmodels import StructureProperty
 from src.parsers.BaseParser import StructureParser
-from src import gimic_utils as gutils
+from . import oldgimic_utils as gutils
 from src import config, utils
 
 

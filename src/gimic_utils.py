@@ -1,475 +1,182 @@
-import threading
-from typing import Tuple, Iterable
-import vtk
-import numpy as np
-from numpy.polynomial.legendre import leggauss
-from scipy.interpolate import RegularGridInterpolator
-from openbabel import openbabel as ob
+# script to convert ORCA NMR output file to GIMIC input
+from dataclasses import dataclass
+from typing import Iterable, Tuple
+import json
 from scipy.optimize import minimize
-from vtkmodules.util.numpy_support import vtk_to_numpy
+import numpy as np
+import os
+from openbabel import openbabel as ob
+from src.GimicBasisSet import SHELL, BasisSet
 from src import utils
 
-def read_vti_file(file_path, timeout=None) -> vtk.vtkImageData:
-    """
-    Reads a .vti file and returns the vtkImageData object.
-
-    Args:
-        file_path (str): Path to the .vti file.
-        timeout (float, optional): Timeout in seconds for reading the file.
-
-    Returns:
-        vtk.vtkImageData: The image data from the .vti file.
-
-    Raises:
-        TimeoutError: If reading the file takes longer than the specified timeout.
-    """
-    result = {}
-    exception = {}
-
-    def worker():
-        try:
-            reader = vtk.vtkXMLImageDataReader()
-            reader.SetFileName(file_path)
-            reader.Update()
-            result['output'] = reader.GetOutput()
-        except Exception as e:
-            exception['error'] = e
-
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    thread.join(timeout)
-    if thread.is_alive():
-        raise TimeoutError(f"Reading VTI file exceeded timeout of {timeout} seconds.")
-    if 'error' in exception:
-        raise exception['error']
-    return result['output']
-
-
-def get_scalar_values(vti_data: vtk.vtkImageData, scalar_name: str="scalars") -> np.ndarray:
-    """Load a VTI grid and scalar field"""
-    dims = vti_data.GetDimensions()
-    origin = np.array(vti_data.GetOrigin())
-    spacing = np.array(vti_data.GetSpacing())
-
-    # convert coords
-    xs = origin[0] + spacing[0] * np.arange(dims[0])
-    ys = origin[1] + spacing[1] * np.arange(dims[1])
-    zs = origin[2] + spacing[2] * np.arange(dims[2])
-    # read ACID field
-    point_data = vti_data.GetPointData()
-    if scalar_name:
-        arr = point_data.GetArray(scalar_name)
-    else:  
-        arr = point_data.GetArray(0)  # assume first array
-    # read scalar data and reshpe to grid
-    flat = vtk_to_numpy(arr)
-    grid = flat.reshape((dims[2], dims[1], dims[0]))
-    grid = np.transpose(grid, (2,1,0))
-    # grid = flat.reshape(dims + (-1,), order='F')
-    return xs, ys, zs, grid, spacing
-    
-
-def get_closest_vector_value(vti_data: vtk.vtkImageData, x: float, y: float, z: float, vector_name: str="vectors"):
-    """
-    Finds the closest point in the VTI data grid to the given coordinates and returns its vector value.
-
-    Args:
-        vti_data (vtk.vtkImageData): The VTI data object.
-        x (float): X-coordinate of the point.
-        y (float): Y-coordinate of the point.
-        z (float): Z-coordinate of the point.
-
-    Returns:
-        tuple: The vector value (vx, vy, vz) at the closest grid point.
-    """
-    origin = np.array(vti_data.GetOrigin())
-    spacing = np.array(vti_data.GetSpacing())
-    dims = np.array(vti_data.GetDimensions())
-
-    # Calculate the indices of the closest grid point
-    indices = np.round((np.array([x, y, z]) - origin) / spacing).astype(int)
-
-    # Ensure indices are within bounds
-    indices = np.clip(indices, 0, dims - 1)
-
-    # Get the vector data
-    vector_array = vti_data.GetPointData().GetArray(vector_name)
-    if not vector_array:
-        raise ValueError("No vector data found in the VTI file.")
-
-    # Convert to numpy array and reshape to grid dimensions
-    vector_values = vti_data.GetPointData().GetArray(vector_name)
-    if not vector_values:
-        raise ValueError(f"Vector field '{vector_name}' not found in the .vti file.")
-    
-    return vector_values.GetTuple(indices[2] * dims[1] * dims[0] + indices[1] * dims[0] + indices[0])
-
-def get_vector_function(vti_data: vtk.vtkImageData, vector_name: str="vectors"):
-    """
-    Converts a vector field in the .vti file to a vector-valued function in 3D space
-    using linear interpolation.
-    
-    Args:
-        vti_data (vtk.vtkImageData): The image data from the .vti file.
-        vector_name (str): Name of the vector field.
-    
-    Returns:
-        function: A vector-valued function f(x, y, z) -> (vx, vy, vz).
-    """
-    
-    def vector_function(x, y, z):
-        return get_closest_vector_value(vti_data, x, y, z, vector_name)
-    
-    return vector_function
-
-# ======= ANALYZE GIMIC OUTPUT =======
-
-def _gl_on_subrect(vector_function, center, u, v, s0, s1, t0, t1, normal, N):
-    """
-    Compute GL tensor-product on subrectangle with s in [s0,s1], t in [t0,t1].
-    s,t are coordinates along u and v (signed distances from center).
-    """
-    # nodes & weights on [-1,1]
-    x, w = leggauss(N)
-
-    # map x->s,t
-    half_s = 0.5 * (s1 - s0)
-    mid_s = 0.5 * (s1 + s0)
-    half_t = 0.5 * (t1 - t0)
-    mid_t = 0.5 * (t1 + t0)
-
-    ws = half_s * w
-    wt = half_t * w
-    s_nodes = mid_s + half_s * x
-    t_nodes = mid_t + half_t * x
-
-    flux = 0.0
-    # loop small N^2 (N up to ~12 is fine)
-    for i in range(N):
-        si = s_nodes[i]
-        wsi = ws[i]
-        for j in range(N):
-            tj = t_nodes[j]
-            wtj = wt[j]
-
-            # map to 3D point
-            r = center + si * u + tj * v
-            Jx, Jy, Jz = vector_function(r[0], r[1], r[2])
-            J = np.array([Jx, Jy, Jz], float)
-            flux += wsi * wtj * np.dot(J, normal)
-
-    # area Jacobian: for u,v not unit or not orthogonal
-    jac = np.linalg.norm(np.cross(u, v))
-    return flux * jac
-
-def calculate_flux_through_plane(
-    vector_function,
-    center,
-    normal,
-    s_min,
-    s_max,
-    t_min,
-    t_max,
-    u,
-    v,
-    N=8,
-    tol_rel=1e-3,
-    tol_abs=0.0,
-    max_depth=6,
-):
-    """
-    Adaptive GL quadrature over rectangular plane.
-
-    Args:
-        vector_function (function): A vector-valued function f(x, y, z) -> (Jx, Jy, Jz).
-        center (array-like): 3D coordinates of the rectangle center.
-        normal (array-like): Normal vector of the plane.
-        s_min (float): Minimum value of the s-coordinate along the u direction.
-        s_max (float): Maximum value of the s-coordinate along the u direction.
-        t_min (float): Minimum value of the t-coordinate along the v direction.
-        t_max (float): Maximum value of the t-coordinate along the v direction.
-        u (array-like): Vector defining the u direction in the plane.
-        v (array-like): Vector defining the v direction in the plane.
-        N (int, optional): Base Gauss-Legendre order used per subrectangle. Default is 8.
-        tol_rel (float, optional): Relative tolerance for local error. Default is 1e-3.
-        tol_abs (float, optional): Absolute tolerance for local error. Default is 0.0.
-        max_depth (int, optional): Maximum subdivision depth. Default is 6.
-
-    Returns:
-        float: The computed flux through the plane.
-    """
-
-    center = np.array(center, float)
-    normal = np.array(normal, float)
-    normal /= np.linalg.norm(normal)
-
-    # recursive adaptive routine
-    def recurse(s0, s1, t0, t1, depth):
-        # coarse estimate (N) and fine estimate (2N)
-        f_coarse = _gl_on_subrect(vector_function, center, u, v, s0, s1, t0, t1, normal, N)
-        f_fine = _gl_on_subrect(vector_function, center, u, v, s0, s1, t0, t1, normal, 2*N)
-
-        # error estimate
-        err = abs(f_fine - f_coarse)
-        tol_local = max(tol_abs, tol_rel * max(abs(f_fine), 1.0))
-
-        if (err <= tol_local) or (depth >= max_depth):
-            # accept fine value
-            return f_fine
-        else:
-            # subdivide into 4 subrectangles (bisect s and t)
-            sm = 0.5 * (s0 + s1)
-            tm = 0.5 * (t0 + t1)
-            return (
-                recurse(s0, sm, t0, tm, depth+1)
-                + recurse(sm, s1, t0, tm, depth+1)
-                + recurse(s0, sm, tm, t1, depth+1)
-                + recurse(sm, s1, tm, t1, depth+1)
-            )
-
-    total_flux = recurse(s_min, s_max, t_min, t_max, depth=0)
-    return total_flux
-
-def find_plane_limits(mol: ob.OBMol, bond: ob.OBBond, width: float, height: float, u: np.ndarray, v: np.ndarray) -> tuple:
-    atom1 = bond.GetBeginAtom()
-    atom2 = bond.GetEndAtom()
-    start = np.array([atom1.GetX(), atom1.GetY(), atom1.GetZ()])
-    end = np.array([atom2.GetX(), atom2.GetY(), atom2.GetZ()])
-
-    # Calculate the bond's center and direction
-    center = (start + end) / 2
-    bond_vector = end - start
-    normal = bond_vector / np.linalg.norm(bond_vector)
-    u = np.array(u)
-    v = np.array(v)
-
-    close_atoms = []
-    close_radiuses = []
-
-    # Iterate over all atoms in the molecule
-    for atom in ob.OBMolAtomIter(mol):
-        if atom in [atom1, atom2]: 
-            continue
-        atom_pos = np.array([atom.GetX(), atom.GetY(), atom.GetZ()])
-        relative_pos = atom_pos - center
-
-        # Project the atom position onto the u and v directions
-        distance = np.abs(np.dot(relative_pos, normal))
-        r = ob.GetCovalentRad(atom.GetAtomicNum())
-        if distance < r:
-            s, t = np.dot(relative_pos, v), np.dot(relative_pos, u)
-            r = np.sqrt(r ** 2 - distance ** 2) # fix radius of cut sphere (pythagorian theorem)
-            close_atoms.append((s, t))
-            close_radiuses.append(r)
-
-    proj_center = (0, 0) # the center is always at the origin of the plane
-
-    return assign_rectangle_edges(close_atoms, close_radiuses, proj_center, width, height)
-
-
-def calculate_flux_through_bond(mol: ob.OBMol, bond: ob.OBBond, vti_data: vtk.vtkImageData, surface_width: float, surface_height: float, n_gl: int=10):
-    """
-    Calculates the flux of a vector field through a bond.
-
-    Args:
-        mol (ob.OBMol): The molecule containing the bond.
-        bond (ob.OBBond): An OpenBabel bond object.
-        vti_data (vtk.vtkImageData): The VTI data containing the vector field.
-        surface_width (float): Width of the integration surface.
-        surface_height (float): Height of the integration surface.
-        n_gl (int): Gauss-Legendre order for integration.
-
-    Returns:
-        float: The flux of the vector field through the bond.
-    """
-
-
-    # Get the bond's start and end points
-    atom1 = bond.GetBeginAtom()
-    atom2 = bond.GetEndAtom()
-    start = np.array([atom1.GetX(), atom1.GetY(), atom1.GetZ()])
-    end = np.array([atom2.GetX(), atom2.GetY(), atom2.GetZ()])
-
-    # Calculate the bond's center and direction
-    center = (start + end) / 2
-    bond_vector = end - start
-    bond_vector = bond_vector / np.linalg.norm(bond_vector)
-    
-    macrocycle_norm, _, _ = utils.find_macrocyle_plane_vectors(mol, "porphyrins")
-    macrocycle_norm /= np.linalg.norm(macrocycle_norm)
-
-    # Find vector roughly in the macrocycle plane orthogonal to both bond_vector and macrocycle normal
-    v = np.cross(bond_vector, macrocycle_norm)
-    v /= np.linalg.norm(v)
-    # find vector orthogonal to the macrocycle plane and the bond vector
-    u = np.cross(bond_vector, v)
-    u /= np.linalg.norm(u)
-
-
-    # find required integration bounds (s and t) to avoid overlap with neighboring atoms
-    smin, smax, tmin, tmax = find_plane_limits(mol, bond, surface_width, surface_height, u, v)
-
-    # Extract the vector function
-    vector_function = get_vector_function(vti_data)
-
-    # Calculate the flux through the bond
-    return calculate_flux_through_plane(
-        vector_function,
-        center,
-        bond_vector, # Normal to the plane
-        smin,
-        smax,
-        tmin,
-        tmax,
-        u,
-        v,
-        N=n_gl
-    )
-
-# ======= ANALYZE ACID OUTPUT =======
-
-def proj_dist_points_to_segment(points, a, b):
-    """
-    Vectorized distance of many points to one segment.
-    points: (N,3)
-    a,b: (3,)
-    returns distances (N,)
-    """
-    ab = b - a
-    ap = points - a
-    bp = points - b
-    ab_norm = np.dot(ab, ab)
-    t = np.sum(ap * ab, axis=1) / ab_norm
-
-    # Calculate orthogonal projection distances
-    proj = a + np.outer(t, ab)
-    orthogonal_distances = np.linalg.norm(points - proj, axis=1)
-
-    # Check if projection is within the segment
-    within_segment = (t >= 0.0) & (t <= 1.0)
-
-    # Calculate distances to endpoints
-    distances_to_a = np.linalg.norm(ap, axis=1)
-    distances_to_b = np.linalg.norm(bp, axis=1)
-
-    # Combine distances based on projection position
-    result_distances = np.where(within_segment, orthogonal_distances, np.minimum(distances_to_a, distances_to_b))
-    return result_distances
-
-
-def compute_bond_voronoi(xs, ys, zs, bonds):
-    """
-    xs,ys,zs: coordinate vectors from VTK
-    bonds: list of (atom_i_coords, atom_j_coords)
-
-    returns bond_idx_grid, shape = (Nx,Ny,Nz)
-    """
-    X, Y, Z = np.meshgrid(xs, ys, zs, indexing='ij')
-    points = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
-    # points = np.column_stack([xs, ys, zs])
-
-
-    nbonds = len(bonds)
-    distances = np.zeros((len(points), nbonds))
-
-    for j,(a,b) in enumerate(bonds):
-        distances[:,j] = proj_dist_points_to_segment(points, np.array(a), np.array(b))
-
-    nearest = np.argmin(distances, axis=1)  
-    return nearest.reshape(len(xs), len(ys), len(zs))
-
-
-def integrate_acid_per_bond(acid_grid, bond_map, spacing, nbonds):
-    dV = spacing[0] * spacing[1] * spacing[2]
-    bond_integrals = np.zeros(nbonds)
-
-    for b in range(nbonds):
-        mask = (bond_map == b)
-        bond_integrals[b] = np.sum(acid_grid[mask]) * dV
-
-    return bond_integrals
-
-def create_acid_interpolator(acid_grid, xs, ys, zs):
-    """
-    Creates an interpolator function for the ACID grid.
-
-    Args:
-        acid_grid (np.ndarray): The scalar field grid (ACID values).
-        xs, ys, zs (np.ndarray): The grid coordinates along x, y, z axes.
-
-    Returns:
-        function: A function that takes x, y, z and returns the interpolated ACID value.
-    """
-    interpolator = RegularGridInterpolator((xs, ys, zs), acid_grid, bounds_error=False, fill_value=None)
-
-    def acid_function(x, y, z):
-        return interpolator((x, y, z))
-
-    return acid_function
-
-def integrate_acid_around_bond(acid_function, bond: ob.OBBond, spacing: float, R: float, nuclie_distance: float):
-    """
-    Integrates the ACID values around a bond within a cylindrical region of radius R.
-
-    Args:
-        acid_function (function): A function that takes (x, y, z) and returns the interpolated ACID value.
-        bond (ob.OBBond): An OpenBabel bond object.
-        spacing (tuple): The grid spacing along x, y, z axes.
-        R (float): Radius of the cylinder around the bond.
-
-    Returns:
-        float: Integrated ACID value for the bond.
-    """
-    # Get the bond's start and end points
-    atom1 = bond.GetBeginAtom()
-    atom2 = bond.GetEndAtom()
-    a = np.array([atom1.GetX(), atom1.GetY(), atom1.GetZ()])
-    c = np.array([atom2.GetX(), atom2.GetY(), atom2.GetZ()])
-
-    ab = c - a
-    ab_norm = np.linalg.norm(ab)
-    ab_unit = ab / ab_norm
-
-    if ab_norm < nuclie_distance * 2:
-        raise ValueError("Cannot take distance larger than bond length!")
-
-    # take distance from each atom nucleaus
-    a = a + ab_unit * nuclie_distance
-    c = c - ab_unit * nuclie_distance
-    
-    # recalculate
-    ab = c - a
-    ab_norm = np.linalg.norm(ab)
-    ab_unit = ab / ab_norm
-
-    # Define a grid of points along the bond axis and within the cylinder radius
-    num_points_along_bond = int(ab_norm / spacing[0]) + 1
-    num_points_radial = int(R / spacing[0]) + 1
-
-    integral = 0.0
-
-    for i in range(num_points_along_bond):
-        t = i / (num_points_along_bond - 1)
-        point_on_bond = a + t * ab
-
-        for j in range(num_points_radial):
-            for k in range(num_points_radial):
-                # Generate points in the radial plane
-                theta = 2 * np.pi * j / num_points_radial
-                r = R * k / num_points_radial
-                offset = r * np.array([np.cos(theta), np.sin(theta), 0])
-
-                # Rotate offset to align with the bond direction
-                rotation_matrix = np.eye(3)
-                rotation_matrix[:2, :2] = [[ab_unit[0], -ab_unit[1]], [ab_unit[1], ab_unit[0]]]
-                rotated_offset = rotation_matrix @ offset
-
-                # Calculate the final point
-                final_point = point_on_bond + rotated_offset
-                integral += acid_function(*final_point) * spacing[0] * spacing[1] * spacing[2]
-
-    return integral
-
+ANGSTROM_TO_AU = 1.8897
+
+# ================
+#  GIMIC IO UTILS
+# ================
+
+ORBITAL_TO_L = {
+    "s": 0,
+    "p": 1,
+    "d": -2, # use of negative values signifies spherical harmonics
+    "f": -3,  # use of negative values signifies spherical harmonics
+    "g": -4,  # use of negative values signifies spherical harmonics
+    "h": -5,  # use of negative values signifies spherical harmonics
+    "i": -6,  # use of negative values signifies spherical harmonics
+}
+
+def orca_to_json(orca_2json_path: str, fname: str):
+    config_dict = {"Densities": ["all"]}
+    basename = os.path.splitext(fname)[0]
+    json_config_path = os.path.join(os.path.dirname(fname), f"{basename}.json.conf")
+    parent_dir = os.path.dirname(os.path.dirname(fname))
+    with open(json_config_path, "w") as f:
+        json.dump(config_dict, f)
+    # ogpath = os.getcwd()
+    # basepath = os.path.dirname(fname)
+    # os.chdir(basepath)
+    v = basename.split("/")
+    basename = f"./{v[-2]}/{v[-1]}"
+    os.system("cd {}; {} {}".format(parent_dir, orca_2json_path, basename))
+    # os.chdir(ogpath)
+
+
+def read_orca_out(orca_2json_path: str, fname: str):
+    """Read the unperturbed and perturbed density matrices"""
+    # runs json reader
+    orca_to_json(orca_2json_path, fname)
+    # load json results
+    basename = os.path.basename(fname).split(".")[0]
+    json_path = os.path.join(os.path.dirname(fname), basename + ".json")
+    with open(json_path, "r") as f:
+        return json.load(f)
+
+def is_openshell(results: dict) -> bool:
+    """determine if a calculation is openshell"""
+    return "scfr" in results["Molecule"]["Densities"]
+
+def read_mol(results: dict):
+    """Read the basis set info and atom coordinates"""
+    coords = []
+    shells = []
+    for atom in results["Molecule"]["Atoms"]:
+        for basisset in atom["BasisFunctions"]:
+            shells.append(
+                SHELL(
+                    atom["Idx"], 
+                    atom["ElementNumber"], 
+                    ORBITAL_TO_L[basisset["Shell"]], 
+                    np.array(basisset["Exponents"]), 
+                    np.array(basisset["Coefficients"]),
+                    coord=atom["Coords"]))
+        coords.append(atom["Coords"])
+    return coords, BasisSet(shells)
+
+def read_densities(results: dict, open_shell: bool):
+    ajr = results["Molecule"]["Densities"]
+    full = np.array(ajr["scfp"])
+    pfull = np.array([np.array(ajr["pbscf_0"]), np.array(ajr["pbscf_1"]), np.array(ajr["pbscf_2"])])
+    if open_shell:
+        spin = np.array(ajr["scfr"])
+        pspin = np.array([np.array(ajr["rbscf_0"]), np.array(ajr["rbscf_1"]), np.array(ajr["rbscf_2"])])
+        return 0.5 * (full + spin), 0.5 * (full - spin), 0.5 * (pfull + pspin), 0.5 * (pfull - pspin)
+    else:
+        return full, None, pfull, None
+
+def format_density(unperturbed, perturbed):
+    """Format the unperturbed (ground-state) and perturbed (magnetically) densities to desired array format.
+    The perturbed density should have dimensions of (3, *perturbed) shape"""
+    densities = np.zeros((1, 4) + unperturbed.shape)
+    densities[0, 0] = unperturbed
+    densities[0, 1:] = perturbed
+    return densities
+
+def format_density_open_shell(alpha, beta, alpha_p, beta_p):
+    """in case of open shell, the density vector contains two "closed shell" vectors, one for each spin"""
+    k = alpha.shape[-1]
+    densities = np.zeros((2, 4, k, k))
+    densities[0, 0] = alpha
+    densities[1, 0] = beta
+    densities[0, 1:] = alpha_p
+    densities[1, 1:] = beta_p
+    return densities
+
+def format_basisset(basisset: BasisSet):
+    """Read the atomic basis set info and cartesian transition matrix for density matrix set from an ORCA file"""
+    CartOrdering = "cfour" # can be "turbomole" also
+    tmat = basisset.Cart2Spher(square=False, real=True, order=CartOrdering, normalized=False)
+    return basisset, tmat
+
+def convert_to_cartesian(formatted_densities, tmat):
+    """Convert the calculation's density matrix (in spherical orbitals) to cartesian orbitals (required for GIMIC)"""
+    # apply the transformation to 'densities' array
+    # the transformation reorganized the basis functions
+    # with the shells organized by types
+    # with the angular momenta organized like CartOrdering
+    nspin = formatted_densities.shape[0]
+    ndensities = np.zeros((nspin, 4, tmat.shape[0], tmat.shape[0]))
+    for ispin in range(nspin):
+        for idir in range(4):# 0, Bx, By, Bz
+            ndensities[ispin, idir] = np.dot(np.dot(tmat, formatted_densities[ispin, idir]), tmat.transpose())
+    return ndensities
+
+
+def write_xdens(densities, xdens_path):
+    nspin = densities.shape[0]
+    # ATTENTION values in XDENS for Bx, By, Bz are 2 times bigger for closeshell and 4 times for openshell
+    if nspin == 1:
+        densities[:, 1:, :, :] *= 2
+    else:
+        densities[:, 1:, :, :] *= 4
+
+    # open outputfile
+    outfile=open(xdens_path, "w")
+
+    # write densities matrices on file
+    # write in a fortran way
+    for ispin in range(nspin):
+        for idir in range(4):# 0, Bx, By, Bz
+            for j in range(densities.shape[3]):
+                for i in range(densities.shape[2]):
+                    outfile.write("%16.8e\n"%(densities[ispin, idir, i, j]))
+            outfile.write("\n")
+    outfile.close()
+
+
+def parse_results(orca_2json_path, fname):
+    """Parse ORCA results to GIMIC friendly information. 
+    RETURNS: atomic coordinates, basisset, densities, openshell (bool)"""
+    results = read_orca_out(orca_2json_path, fname)
+    open_shell = is_openshell(results)
+    alpha, beta, alpha_p, beta_p = read_densities(results, open_shell)
+    _, basisset = read_mol(results)
+    basisset, mat = format_basisset(basisset)
+    if open_shell:
+        densities = format_density_open_shell(alpha, beta, alpha_p, beta_p)
+    else:
+        densities = format_density(alpha, alpha_p)
+    densities = convert_to_cartesian(densities, mat)
+    return basisset, densities
+
+def convert_to_gimic(orca_2json_path: str, fname: str, xdens_file_path: str, mol_file_path: str):
+    """Convert an ORCA magnietic computation output to GIMIC compatible format"""
+    print("reading orca out...")
+    basisset, densities = parse_results(orca_2json_path, fname)
+    # write xdens
+    print("writing density file...")
+    write_xdens(densities, xdens_file_path)
+    # write basis set
+    print("writing mol file...")
+    basisset.write_MOL(filename=mol_file_path, coords=None, turbomole=False)
+    print("done writing GIMIC files!")
+    print("deleting orca json output...")
+    json_path = fname.split(".")[0] + ".json"
+    os.remove(json_path)
+
+
+# ========================
+#  GIMIC INPUT GENERATION
+# ========================
 
 Point = Tuple[float, float]
 
@@ -554,63 +261,129 @@ def assign_rectangle_edges(
         return best_L, best_L + W, best_B, best_B + H
     else:
         raise ValueError("Cannot find rectangle!")
-
-
-
-if __name__ == "__main__":
-    import os
-    from src import config
-    vti_file = os.path.join(config.DATA_DIR, "nmr", "ATUSOX_0_out", "gimic", "acid.vti")
-    res = None
-    print("starting to read...")
-    try:
-        res = read_vti_file(vti_file, 60 * 20)
-    except TimeoutError:
-        print("HEY! i had a timout error")
-    print("HEY! i finished normally")
-    print(res)
-    import sys; sys.exit()
     
     
-    from matplotlib import pyplot as plt
-    mol_file = os.path.join(config.DATA_DIR, "xyz", "dft", "ATUSOX" + "_0.xyz")
-    mol = utils.get_molecule(mol_file)
-    bond = mol.GetBond(18, 19)
+@dataclass
+class Rectangle:
+    origin: np.ndarray
+    xvec: np.ndarray
+    yvec: np.ndarray
+    width: float
+    height: float
+    gauss_order: int = 9
+    grid_spacing: float = 0.4
 
-    # Get the bond's start and end points
+    def to_gimic_definition(self):
+        return f"""Grid(bond) {{
+type=gauss
+distance=0 # must have for this grid type, not used in practice
+coord1=[{",".join([str(x) for x in self.xvec])}]
+coord2=[{",".join([str(x) for x in self.yvec])}]
+fixcoord=[{",".join([str(x) for x in self.origin])}]
+height=[0, {self.height}]
+width=[0, {self.width}]
+gauss_order={self.gauss_order}
+spacing=[{self.grid_spacing}, {self.grid_spacing}, 0]
+}}"""
+
+
+def find_bond_plane(mol: ob.OBMol, bond: ob.OBBond, width: float, height: float) -> Rectangle:
     atom1 = bond.GetBeginAtom()
     atom2 = bond.GetEndAtom()
     start = np.array([atom1.GetX(), atom1.GetY(), atom1.GetZ()])
     end = np.array([atom2.GetX(), atom2.GetY(), atom2.GetZ()])
 
-    # Calculate the bond's center and direction
     center = (start + end) / 2
     bond_vector = end - start
-    bond_vector = bond_vector / np.linalg.norm(bond_vector)
-    
+    normal = bond_vector / np.linalg.norm(bond_vector)
+
     macrocycle_norm, _, _ = utils.find_macrocyle_plane_vectors(mol, "porphyrins")
     macrocycle_norm /= np.linalg.norm(macrocycle_norm)
 
-    # Find vector roughly in the macrocycle plane orthogonal to both bond_vector and macrocycle normal
     v = np.cross(bond_vector, macrocycle_norm)
     v /= np.linalg.norm(v)
-    # find vector orthogonal to the macrocycle plane and the bond vector
     u = np.cross(bond_vector, v)
     u /= np.linalg.norm(u)
 
-    l, r, b, t = find_plane_limits(mol, bond, 5, 10, u, v)
+    close_atoms = []
+    close_radiuses = []
+
+    for atom in ob.OBMolAtomIter(mol):
+        if atom in [atom1, atom2]: 
+            continue
+        atom_pos = np.array([atom.GetX(), atom.GetY(), atom.GetZ()])
+        relative_pos = atom_pos - center
+
+        distance = np.abs(np.dot(relative_pos, normal))
+        r = ob.GetCovalentRad(atom.GetAtomicNum())
+        if distance < r:
+            s, t = np.dot(relative_pos, v), np.dot(relative_pos, u)
+            r = np.sqrt(r ** 2 - distance ** 2)
+            close_atoms.append((s, t))
+            close_radiuses.append(r)
+
+    proj_center = (0, 0)
+    smin, smax, tmin, tmax = assign_rectangle_edges(close_atoms, close_radiuses, proj_center, width, height)
+
+    # Adjust center to lower left corner
+    origin = center + smin * v + tmin * u
+
+    return Rectangle(
+        origin = origin * ANGSTROM_TO_AU, 
+        xvec = (origin + v) * ANGSTROM_TO_AU, 
+        yvec = (origin + u) * ANGSTROM_TO_AU, 
+        width = (smax - smin) * ANGSTROM_TO_AU, 
+        height = (tmax - tmin) * ANGSTROM_TO_AU
+    )
+
+def find_magnetic_field(mol: ob.OBMol):
+    macrocycle_norm, _, _ = utils.find_macrocyle_plane_vectors(mol, "porphyrins")
+    macrocycle_norm /= np.linalg.norm(macrocycle_norm)
+    return macrocycle_norm * ANGSTROM_TO_AU
+
+def gimic_bond_grid_definition(mol: ob.OBMol, bond: ob.OBBond, width: float, height: float, grid_spacing: float=0.4, gauss_order: int=9) -> Rectangle:
+    """
+    Generates a grid definition string for GiMiC calculations on a specified bond in a molecule.
+    This function defines a rectangular grid in the plane of a given bond, suitable for use with GiMiC
+    (Gauge Including Magnetically Induced Currents) calculations. The grid is centered on the bond and 
+    oriented according to the molecular geometry.
+    Args:
+        mol (ob.OBMol): The molecule containing the bond.
+        bond (ob.OBBond): The bond for which the grid is defined.
+        width (float): The width of the grid in angstroms.
+        height (float): The height of the grid in angstroms.
+        grid_spacing (float, optional): The spacing between grid points in angstroms. Default is 0.4.
+        gauss_order (int, optional): The order of the Gaussian quadrature. Default is 9.
+    Returns:
+        str: A formatted string defining the grid for GIMIC input.
+    """
+    rect = find_bond_plane(mol, bond, width, height)
+    rect.gauss_order = gauss_order
+    rect.grid_spacing = grid_spacing
+    return rect
     
-    # adds hydrogen atoms to the molecule on the rectangle edges
-    borders = [(l, b), (l, t), (r, b), (r, t)]
-    for x, y in borders:
-        coords = center + v * x + u * y
-        hydrogen = ob.OBAtom()
-        hydrogen.SetAtomicNum(1)
-        hydrogen.SetVector(coords[0], coords[1], coords[2])
-        mol.AddAtom(hydrogen)
-    out_file = "test.xyz"
-    obConversion = ob.OBConversion()
-    obConversion.SetOutFormat("xyz")
-    obConversion.WriteFile(mol, out_file)
 
-
+def parse_gimic_output(path: str):
+    """Parse output of a GIMIC calculation as a JSON format"""
+    current_density_block = False
+    ajr = {}
+    with open(path, "r") as f:
+        lines = f.readlines()
+    
+    for line in lines:
+        if "*** Integrating total density" in line:
+            current_density_block = True
+            continue
+        if "Positive" in line and current_density_block:
+            ajr["positive_current"] = float(line.split()[-2])
+        if "Negative" in line and current_density_block:
+            ajr["negative_current"] = float(line.split()[-2])
+        if "Induced current (nA/T)  :" in line and current_density_block:
+            ajr["total_current"] = float(line.split()[-1])
+            current_density_block = False
+        if "ACID (au) sqrt(delta J^2)" in line:
+            ajr["acid_sqrt(J^2)"] = float(line.split()[-1])
+        if "ACID (nA/T)" in line:
+            ajr["acid_current"] = float(line.split()[-1])
+    return ajr
+    
