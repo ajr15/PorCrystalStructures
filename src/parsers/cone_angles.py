@@ -3,8 +3,10 @@ from copy import deepcopy
 import numpy as np
 from typing import List
 from openbabel import openbabel as ob
-from src.read_to_sql import Structure, Substituent, SubstituentProperty
+from sqlalchemy.orm import Session
+from src.sqlmodels import Structure, StructureSubstituents, SubstituentProperty
 from src.utils import get_molecule
+from src.parsers.BaseParser import StructureParser
 
 def molecule_from_id(session, sid: str) -> ob.OBMol:
     """get an OBMol for a given structure ID"""
@@ -69,7 +71,7 @@ def cone_angle(points: np.ndarray, radii: np.ndarray, origin: np.ndarray, origin
 def get_ligands(session, sid, position) -> List[ob.OBMol]:
     """Get the ligand molecules as OBMol sorted by position index"""
     # fetch data from database
-    ligand_idxs = session.query(Substituent.atom_indicis, Substituent.position_index, Substituent.substituent).filter(Substituent.structure == sid).filter(Substituent.position == position).order_by(Substituent.position_index).all()
+    ligand_idxs = session.query(StructureSubstituents.atom_indicis, StructureSubstituents.position_index, StructureSubstituents.substituent).filter(StructureSubstituents.structure == sid).filter(StructureSubstituents.position == position).order_by(StructureSubstituents.position_index).all()
     mol = molecule_from_id(session, sid)
     # get ligand molecules
     ajr = []
@@ -96,17 +98,17 @@ def get_mol_entries(session, sid):
     positions = ["meso", "beta", "axial"]
     entries = []
     for pos in positions:
-        for points, radii, pos_idx, origin, origin_radius, smiles in get_ligands(session, sid, pos):
+        for points, radii, pos_idx, origin, origin_radius, subid in get_ligands(session, sid, pos):
             # print(sid, pos, pos_idx)
             if origin is None:
                 print("NULL ORIGIN ATOM AT", sid)
                 return []
             angle = cone_angle(points, radii, origin, origin_radius)
-            entry = SubstituentProperty(smiles=smiles, 
+            entry = SubstituentProperty(substituent=subid, 
                                         property="cone angle", 
                                         value=angle, 
                                         units="degree", 
-                                        source="calculated", 
+                                        source="", 
                                         structure=sid, 
                                         position=pos, position_index=pos_idx)
             entries.append(entry)
@@ -114,18 +116,43 @@ def get_mol_entries(session, sid):
     return entries
 
 def main(session, n):
-    problematic_sids = []
-    sids = session.query(Structure.id).all()
-    for sid in sids:
-        sid = sid[0]
-        entries = get_mol_entries(session, sid)
-        if len(entries) == 0:
-            problematic_sids.append(sid)
-        session.add_all(entries)
-    session.commit()
-    print("YOU HAVE", len(problematic_sids), "PROBLEMATIC STRUCTURES:")
-    for sid in problematic_sids:
-        print(sid)
+        """Parse the data to SQL entries"""
+        problematic_sids = []
+        sids = session.query(Structure.id).all()
+        for sid in sids:
+            sid = sid[0]
+            entries = get_mol_entries(session, sid)
+            if len(entries) == 0:
+                problematic_sids.append(sid)
+            session.add_all(entries)
+        session.commit()
+        print("YOU HAVE", len(problematic_sids), "PROBLEMATIC STRUCTURES:")
+        for sid in problematic_sids:
+            print(sid)
+
+class Parser (StructureParser):
+
+    name = "cone_angles_calculator"
+    source_prefix = "cone_angles"
+
+    def parse_structure(self, session: Session, sid: str):
+        positions = ["meso", "beta", "axial"]
+        entries = []
+        for pos in positions:
+            for points, radii, pos_idx, origin, origin_radius, subid in get_ligands(session, sid, pos):
+                if origin is None:
+                    return [], ["ERROR: null origin atom at " + sid]
+                angle = cone_angle(points, radii, origin, origin_radius)
+                entry = SubstituentProperty(substituent=subid, 
+                                            property="cone angle", 
+                                            value=angle, 
+                                            units="degree", 
+                                            source="", 
+                                            structure=sid, 
+                                            position=pos, position_index=pos_idx)
+                entries.append(entry)
+        
+        return entries, [] if len(entries) > 0 else ["WARNING: no entries for " + sid]
 
 
 if __name__ == "__main__":

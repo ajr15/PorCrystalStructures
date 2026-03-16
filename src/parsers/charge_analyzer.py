@@ -2,8 +2,10 @@
 # first, analyze the charges of the axial ligands and then analyze metal charges
 import numpy as np
 from openbabel import openbabel as ob
-import utils
-from src.read_to_sql import SubstituentProperty, Substituent, Structure
+from sqlalchemy.orm import Session
+from src.sqlmodels import SubstituentProperty, Substituent, Structure, StructureSubstituents
+from src.parsers.BaseParser import StructureParser
+from src import utils
 
 PERIODIC_TABLE_BLOCKS = {
     "S": [1, 3, 11, 19, 37, 55, 87],
@@ -29,6 +31,9 @@ def number_of_available_bonds(atom: ob.OBAtom):
     # if atom is nitrogen make sure it has only 3 bonds
     if atom.GetAtomicNum() == 7:
         max_bonds = 3
+    # make sure that silicon (Z=14) has only 4 bonds
+    if atom.GetAtomicNum() == 14:
+        max_bonds = 4
     # the formal charge is the number of bonds minus the max number of bonds 
     return max_bonds - nbonds
 
@@ -41,21 +46,23 @@ def get_neighbors(atom: ob.OBAtom):
             ajr.append(bond.GetEndAtom())
     return ajr
 
-def axial_ligand_charge(mol: ob.OBMol):
+def axial_ligand_charge(mol: ob.OBMol, bounded_atom_idx: int):
     """Get the charge of the axial ligand, assuming the connecting site is a dummy atom"""
     mol.AddHydrogens()
-    # find the dummy atom position
-    dummy = None
-    for atom in ob.OBMolAtomIter(mol):
-        if atom.GetAtomicNum() == 0:
-            dummy = atom
-    if dummy is None:
-        print("AXIAL", utils.mol_to_smiles(mol), "HAS NO DUMMY")
-        exit()
-    # find the neighboring atom of the atom
-    bounded_atom = get_neighbors(dummy)[0]
-    # removing dummy from molecule
-    mol.DeleteAtom(dummy)
+    # LEGACY - finds bounded atom based on dummy
+    # # find the dummy atom position
+    # dummy = None
+    # for atom in ob.OBMolAtomIter(mol):
+    #     if atom.GetAtomicNum() == 0:
+    #         dummy = atom
+    # if dummy is None:
+    #     print("AXIAL", utils.mol_to_smiles(mol), "HAS NO DUMMY")
+    #     exit()
+    # # find the neighboring atom of the atom
+    # bounded_atom = get_neighbors(dummy)[0]
+    # # removing dummy from molecule
+    # mol.DeleteAtom(dummy)
+    bounded_atom = mol.GetAtom(bounded_atom_idx)
     # fix for the NO, N2 and O2 molecules - should be neutral
     if mol.NumAtoms() == 2 and all([atom.GetAtomicNum() in [7, 8] for atom in ob.OBMolAtomIter(mol)]):
         return 0
@@ -75,21 +82,23 @@ def axial_ligand_charge(mol: ob.OBMol):
         return 0        
     else:
         nbonds = number_of_available_bonds(bounded_atom)
-    return - max(nbonds - available, 0)
+    nelec = sum([atom.GetAtomicNum() for atom in ob.OBMolAtomIter(mol)])
+    charge = - max(nbonds - available, 0)
+    # if (nelec - charge) % 2 != 0:
+    #     raise RuntimeError(f"Estimated charge {charge} to molecule {utils.mol_to_smiles(mol)}. but it will have odd number ({nelec - charge}) of electrons!")
+    return charge - (nelec - charge) % 2
 
 
 def get_all_axial_ligands(session):
-    return session.query(Substituent.substituent).filter(Substituent.position == "axial").distinct().all()
+    return session.query(Substituent).join(StructureSubstituents, Substituent.id == StructureSubstituents.substituent).filter(StructureSubstituents.position == 'axial').distinct().all()
 
 def axial_ligand_analysis(session):
     ligands = get_all_axial_ligands(session)
     entries = []
     for ligand in ligands:
-        ligand = ligand[0]
-        mol = utils.mol_from_smiles(ligand)
-        charge = axial_ligand_charge(mol)
-        entry = SubstituentProperty(smiles=ligand, property="charge", value=charge, source="charge_analyzer")
-        print(ligand, charge)
+        mol = utils.mol_from_smiles(ligand.smiles)
+        charge = axial_ligand_charge(mol, ligand.connected_atom)
+        entry = SubstituentProperty(substituent=ligand.id, property="charge", value=charge, source="charge_analyzer") # IMPORTANT: give the full source here, otherwise it will not clear database properly
         entries.append(entry)
     session.add_all(entries)
     session.commit()
@@ -102,17 +111,19 @@ def get_macrocycle_charge(session, sid: int):
         return -2
     
 def get_axial_charge(session, sid: int):
-    axials = session.query(Substituent.substituent).filter(Substituent.structure == sid).filter(Substituent.position == "axial").all()
+    axials = session.query(StructureSubstituents.substituent).filter(StructureSubstituents.structure == sid).filter(StructureSubstituents.position == "axial").all()
     tcharge = 0
     for a in axials:
         a = a[0]
-        c = session.query(SubstituentProperty.value).filter(SubstituentProperty.smiles == a).filter(SubstituentProperty.property == "charge").all()[0][0]
+        c = session.query(SubstituentProperty.value).filter(SubstituentProperty.substituent == a).filter(SubstituentProperty.property == "charge").all()[0][0]
         tcharge += c
     return tcharge
 
 
 def get_metal(session, sid: int):
-    return session.query(Substituent.substituent).filter(Substituent.structure == sid).filter(Substituent.position == "metal").all()[0][0]
+    subid = session.query(StructureSubstituents.substituent).filter(StructureSubstituents.structure == sid).filter(StructureSubstituents.position == "metal").all()[0][0]
+    smiles = session.query(Substituent.smiles).filter(Substituent.id == subid).all()[0][0]
+    return smiles, subid
 
 
 def electron_configuration(z: int):
@@ -163,16 +174,16 @@ def metal_charge_analysis(session):
         base_c = -2
         axial_c = get_axial_charge(session, sid)
         metal_charge = - (base_c + axial_c)
-        smiles = get_metal(session, sid)
+        smiles, subid = get_metal(session, sid)
         z = ob.GetAtomicNum(smiles[1:-1])
         configuration = ionized_configuration(z, metal_charge)
         print(smiles, metal_charge, configuration)
-        entries.append(SubstituentProperty(smiles=smiles, property="charge", value=metal_charge, source="charge_analyzer", structure=sid))
-        entries.append(SubstituentProperty(smiles=smiles, property="p_population", value=configuration[-1], source="charge_analyzer", structure=sid))
-        entries.append(SubstituentProperty(smiles=smiles, property="s_population", value=configuration[-2], source="charge_analyzer", structure=sid))
-        entries.append(SubstituentProperty(smiles=smiles, property="d_population", value=configuration[-3], source="charge_analyzer", structure=sid))
-        entries.append(SubstituentProperty(smiles=smiles, property="f_population", value=configuration[-4], source="charge_analyzer", structure=sid))
-        entries.append(SubstituentProperty(smiles=smiles, property="valence_level", value=configuration[-5], source="charge_analyzer", structure=sid))
+        entries.append(SubstituentProperty(substituent=subid, property="charge", value=metal_charge, source="", structure=sid))
+        entries.append(SubstituentProperty(substituent=subid, property="p_population", value=configuration[-1], source="", structure=sid))
+        entries.append(SubstituentProperty(substituent=subid, property="s_population", value=configuration[-2], source="", structure=sid))
+        entries.append(SubstituentProperty(substituent=subid, property="d_population", value=configuration[-3], source="", structure=sid))
+        entries.append(SubstituentProperty(substituent=subid, property="f_population", value=configuration[-4], source="", structure=sid))
+        entries.append(SubstituentProperty(substituent=subid, property="valence_level", value=configuration[-5], source="", structure=sid))
 
     session.add_all(entries)
     session.commit()
@@ -186,6 +197,36 @@ def main(session, n):
     axial_ligand_analysis(session)
     print("======== ANALYZING METAL CHARGES ========")
     metal_charge_analysis(session)
+
+class Parser (StructureParser):
+
+    name = "charge_analyzer"
+    source_prefix = "charge_analyzer"
+
+    def parse_structure(self, session: Session, sid: int):
+        base_c = -2
+        axial_c = get_axial_charge(session, sid)
+        metal_charge = - (base_c + axial_c)
+        smiles, subid = get_metal(session, sid)
+        z = ob.GetAtomicNum(smiles[1:-1])
+        configuration = ionized_configuration(z, metal_charge)
+        return [
+            SubstituentProperty(substituent=subid, property="charge", value=metal_charge, source="", structure=sid),
+            SubstituentProperty(substituent=subid, property="p_population", value=configuration[-1], source="", structure=sid),
+            SubstituentProperty(substituent=subid, property="s_population", value=configuration[-2], source="", structure=sid),
+            SubstituentProperty(substituent=subid, property="d_population", value=configuration[-3], source="", structure=sid),
+            SubstituentProperty(substituent=subid, property="f_population", value=configuration[-4], source="", structure=sid),
+            SubstituentProperty(substituent=subid, property="valence_level", value=configuration[-5], source="", structure=sid)
+        ], []
+
+    def parse(self, session: Session, n: int):
+        # add the axial ligand analysis before the structure-based analysis
+        print("analyzing ligand charges...")
+        axial_ligand_analysis(session)
+        # normally run structure analysis
+        print("analyzing metal charges...")
+        return super().parse(session, n)
+
 
 
 if __name__ == "__main__":

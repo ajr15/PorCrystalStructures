@@ -3,7 +3,8 @@ import os
 from shutil import copyfile
 import json
 from src import config
-from src.read_to_sql import StructureProperty, Structure
+from src.sqlmodels import StructureProperty, Structure
+from src.parsers.BaseParser import StructureParser, Session
 
 def json_to_dicts(parameters: dict):
     """Convert Porphystruct JSON results file to list of dict entries"""
@@ -27,7 +28,7 @@ def json_to_dicts(parameters: dict):
         entries.append({"property": "metal - {} distance".format(pname), "value": d["Value"], "units": "A"})
     return entries
 
-def entries_for_structure(json_dir):
+def _entries_for_structure(json_dir):
     ajr = []
     source = os.path.split(json_dir)[-1]
     for fname in os.listdir(json_dir):
@@ -36,6 +37,20 @@ def entries_for_structure(json_dir):
             parameters = json.load(f)
             ajr += [StructureProperty(structure=sid, source="porphystruct-" + source, **kwargs) for kwargs in json_to_dicts(parameters)]
     return ajr
+
+
+def entries_for_structure(sid: str, source: str):
+    xyz = os.path.join(config.DATA_DIR, "xyz", source, sid + "_0.xyz")
+    if not os.path.exists(xyz):
+        return [], [f"INFO: no xyz file for {sid} (should be {xyz})"]
+    porphystruct_output = os.path.join(config.DATA_DIR, "nonplanarity", source, sid + "_0_analysis.json")
+    if not os.path.exists(porphystruct_output):
+        os.system(f"bash $CRYSTAL_SRC_DIR/scripts/porphystruct_analysis.bash {sid} {source}")
+    if not os.path.exists(porphystruct_output):
+        return [], [f"ERROR: Porphystruct calculation failed for {sid}"]
+    with open(porphystruct_output, "r") as f:
+        parameters = json.load(f)
+        return [StructureProperty(structure=sid, source=source, **kwargs) for kwargs in json_to_dicts(parameters)], []
 
 
 def main(session, n):
@@ -63,3 +78,15 @@ def main(session, n):
     session.add_all(ajr)
     session.commit()
     print("ALL DONE")
+
+class Parser (StructureParser):
+
+    name = "porphystruct"
+    source_prefix = "porphystruct/"
+
+    def parse_structure(self, session: Session, sid: str):
+        """Parse the data to SQL entries"""
+        entries, msgs = entries_for_structure(sid, "crystal")
+        dftentries, dftmsgs = entries_for_structure(sid, "dft")
+        return entries + dftentries, msgs + dftmsgs
+

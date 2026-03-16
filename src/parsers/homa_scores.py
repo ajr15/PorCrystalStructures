@@ -3,8 +3,10 @@ import os
 import numpy as np
 from networkx.algorithms import isomorphism
 from openbabel import openbabel as ob
+from sqlalchemy.orm import Session
 from src import utils, config
-from src.read_to_sql import StructureProperty
+from src.sqlmodels import StructureProperty
+from src.parsers.BaseParser import BaseParser
 
 BOND_ORDER_DATA = {
     "CC": {"R1": 1.467, "R2": 1.349, "c": 0.1702, "ROPT": 1.388},
@@ -121,7 +123,7 @@ def mol_entries(sid, path: str, source: str):
         circuit_mol = get_circuit_mol(mol, stype, circuit_idxs)
         homa_dict = calc_homa_properties(circuit_mol, alpha)
         for k, v in homa_dict.items():
-            ajr.append(StructureProperty(structure=sid, source="homa-" + source, property="{} {}".format(circuit_name, k), value=v))
+            ajr.append(StructureProperty(structure=sid, source=source, property="{} {}".format(circuit_name, k), value=v))
     return ajr
 
 def entries_for_structure(data_dir: str):
@@ -149,6 +151,20 @@ def main(session, n):
     session.commit()
     print("ALL DONE")
 
+class Parser (BaseParser):
+
+    name = "homa_score_calculation"
+    source_prefix = "homa/"
+
+    def parse(self, session: Session, n: int):
+        """Parse the data to SQL entries"""
+        crystal_dir = os.path.join(config.DATA_DIR, "xyz", "crystal")
+        print(f"reading crystral structures from {crystal_dir}...")
+        ajr = entries_for_structure(crystal_dir)
+        dft_dir = os.path.join(config.DATA_DIR, "xyz", "dft")
+        print(f"reading dft structures from {dft_dir}...")
+        ajr += entries_for_structure(dft_dir)
+        return ajr
 
 
 if __name__ == "__main__":

@@ -10,6 +10,9 @@ __pycache__/
 ccdc_data/
 cod_data/
 data/
+data
 # igrore model results directories
 models/
 results/
+# ignore database
+./main.db
