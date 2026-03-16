@@ -89,8 +89,8 @@ class Parser (StructureParser):
 
     name = "gimic"
     source_prefix = "gimic/"
-    widths = [1.5 + 0.5 * i for i in range(8)]
-    heights = [1.5 + 0.5 * i for i in range(8)]
+    widths = [2 + 0.5 * i for i in range(16)]
+    heights = [2 + 0.5 * i for i in range(16)]
     # widths = [3]
     # heights = [2]
 
@@ -129,7 +129,14 @@ class Parser (StructureParser):
         for i, a in enumerate(args):
             _, sid = a
             print(f"Parsing {sid} ({i + 1} out of {len(args)})")
-            ajr.append(self._parse_structure(a))
+            # ajr.append(self._parse_structure(a))
+            entries, msg = self._parse_structure(a)
+            print(msg)
+            for entry in entries:
+                if hasattr(entry, "source"):
+                    entry.source = self.source_prefix + entry.source
+            session.add_all(entries)
+            session.commit()
         results = [x[0] for x in ajr]
         messages = list(chain(*[x[-1] for x in ajr]))
         print("Done!")
