@@ -11,6 +11,43 @@ from openbabel import openbabel as ob
 import multiprocessing
 from src import utils
 
+def valid_valence(mol: ob.OBMol) -> bool:
+    """validate that the hydrogenation is proper in the molecule"""
+    mol.AddHydrogens()
+    z_in_bond = lambda b, z: b.GetBeginAtom().GetAtomicNum() == z or b.GetEndAtom().GetAtomicNum() == z
+    for atom in ob.OBMolAtomIter(mol):
+        z = atom.GetAtomicNum()
+        bonds = ob.OBAtomBondIter(atom)
+        # if atom is bound to a metal skip it - its binding is too hard to determine
+        bound_to_metal = any([utils.is_metal(b.GetBeginAtom()) or utils.is_metal(b.GetEndAtom()) for b in bonds])
+        if bound_to_metal:
+            continue
+        # starting to analyze carbons
+        if z == 6:
+            # if the carbon already has hydrogens attached to it, we assume it is well hydrogenated.
+            # this is based on the fact that if a crystal structure has any hydrogens it should have the correct amount
+            has_hydrogens = any([z_in_bond(b, 1) for b in ob.OBAtomBondIter(atom)])
+            if has_hydrogens:
+                continue
+            # check if the neighboring atoms have hydrogens on them - if yes, chances are that there is a proper hydrogenation
+            # also check if it has some neighbor hetero-atom connected to a metal - this can lead to bizzare bonding
+            has_neighboring_hydrogens = False
+            has_neighboring_hetero = False
+            for a in ob.OBAtomAtomIter(atom):
+                if any([z_in_bond(b, 1) for b in ob.OBAtomBondIter(a)]):
+                    has_neighboring_hydrogens = True
+                if a.GetAtomicNum() in [7, 8] and any([utils.is_metal(b.GetBeginAtom()) or utils.is_metal(b.GetEndAtom()) for b in ob.OBAtomBondIter(a)]):
+                    has_neighboring_hetero = True
+            if has_neighboring_hydrogens or has_neighboring_hetero:
+                continue
+            # if no hydrogens are present, count the number of bonds of the atom and compare it to its valence
+            nbonds = sum([b.GetBondOrder() for b in ob.OBAtomBondIter(atom)])
+            valence = ob.GetMaxBonds(z)
+            if nbonds != valence:
+                return False, "BAD VALENCE"
+    return True, ""
+
+
 def topologically_valid(mol: ob.OBMol, structure: str, nisomorphs: int) -> bool:
     """Validate the topology of the complex"""
     # if the molecule is not fully connected, return false
@@ -88,13 +125,19 @@ def has_metal(mol):
 def curate_structure(args):
     mol_path, target_path, structure, nisomorphs = args
     mol = utils.get_molecule(mol_path)
-    # if not has_metal(mol):
-    #     print(mol_path, "metal", "NO_METAL")
-    #     return
+    mol.ConnectTheDots()
+    # mol.PerceiveBondOrders()
+    if not has_metal(mol):
+        print(mol_path, "metal", "NO_METAL")
+        return
     res, msg = topologically_valid(mol, structure, nisomorphs)
     if not res:
         print(mol_path, "topolocial", msg)
         return
+    res, msg = valid_valence(mol)
+    if not res:
+        print(mol_path, "valence", msg)
+        return    
     res, msg = valid_charge(mol_path, mol)
     if not res:
         print(mol_path, "charge", msg)
@@ -104,8 +147,8 @@ def curate_structure(args):
 
 def main(structure: str, nisomorphs: int, nworkers: int):
     print("initializing...")
-    xyz_dir = utils.get_directory("xyz", structure)
-    cur_dir = utils.get_directory("non_metal_curated", structure, create_dir=True)
+    xyz_dir = utils.get_directory("raw_xyz/xyz", structure)
+    cur_dir = utils.get_directory("curated_xyz", structure, create_dir=True)
     args = []
     for fname in os.listdir(xyz_dir):
         args.append((os.path.join(xyz_dir, fname), os.path.join(cur_dir, fname), structure, nisomorphs))
@@ -123,9 +166,25 @@ def main(structure: str, nisomorphs: int, nworkers: int):
     print("total curated XYZ files:", len(os.listdir(cur_dir)))
 
 
+
+def test1():
+    from src import config
+    xyzdir = os.path.join(config.DATA_DIR, "raw_xyz", "xyz", "porphyrins")
+    path = os.path.join(xyzdir, "BOQPIG_0.xyz")
+    # mol = utils.get_molecule(path)
+    # for a in ob.OBMolAtomIter(mol):
+    #     print(ob.GetSymbol(a.GetAtomicNum()), utils.is_metal(a))
+    curate_structure((path, ".", "porphyrins", 1))
+    # mol.ConnectTheDots()
+    # res, msg = topologically_valid(mol, "porphyrins", 1)
+    # if not res:
+    #     print(res, msg)
+    # valid_valence(mol)
+
+
 if __name__ == "__main__":
-    # test_corrole()
-    # exit()
+    test1()
+    exit()
     parser = utils.read_command_line_arguments("curate XYZ files using substructure matching", return_args=False)
     parser.add_argument("--nworkers", type=int, default=1, help="number of worker for parallel processing of files")
     parser.add_argument("--nisomorphs", type=int, default=1, help="number of distinct isomorphisms between definition and molecule (1=monomer, 2=dimer...)")

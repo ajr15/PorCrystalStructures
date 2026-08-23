@@ -1,6 +1,6 @@
 # script to parse data from all the sources (XYZ, non-planarity...) to a single SQLite database
 # this is to ensure a consistant and convenient access to processed data, to be used in statistical models
-from sqlalchemy import Column, String, Integer, Float, ForeignKey
+from sqlalchemy import Column, String, Integer, Float, ForeignKey, JSON
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import declarative_base
@@ -17,6 +17,8 @@ class Structure (SqlBase):
     xyz = Column(String)
     cif = Column(String)
     smiles = Column(String)
+    structure_metadata = Column(JSON)
+    doi = Column(String)
     orca_out = Column(String)
     orca_xyz = Column(String)
 
