@@ -20,6 +20,21 @@ import numpy as np
 from src.sqlmodels import Structure
 from src import config
 
+def connect_the_dots(mol: ob.OBMol, tol: float=1.1) -> ob.OBMol:
+    mol.ConnectTheDots()
+    for atom in ob.OBMolAtomIter(mol):
+        if is_metal(atom):
+            for other in ob.OBMolAtomIter(mol):
+                if other.GetIdx() == atom.GetIdx():
+                    continue
+                if other.GetAtomicNum() == 1:
+                    continue
+                critical_distance = (ob.GetVdwRad(atom.GetAtomicNum()) + ob.GetVdwRad(other.GetAtomicNum())) * tol
+                if atom.GetDistance(other) <= critical_distance and not atom.IsConnected(other):
+                    mol.AddBond(atom.GetIdx(), other.GetIdx(), 1)
+    return mol
+
+
 def get_molecule(path: str) -> ob.OBMol:
     """Method to get a molecule by its name"""
     obmol = ob.OBMol()

@@ -3,12 +3,14 @@
 #   - has exactly 4 pyrole rings - ensure no dimers or other weird structures
 #   - has exactly 3 meso carbons for corroles and 4 meso carbons for porphyrins - ensure we deal with a corrole / porphyrin macrocycle
 #   - has exactly one metal center
+import pandas as pd
 import networkx as nx
 import os
 from functools import reduce
 import shutil
 from openbabel import openbabel as ob
 import multiprocessing
+from tqdm import tqdm
 from src import utils
 
 def valid_valence(mol: ob.OBMol) -> bool:
@@ -128,22 +130,23 @@ def curate_structure(args):
     mol.ConnectTheDots()
     # mol.PerceiveBondOrders()
     if not has_metal(mol):
-        print(mol_path, "metal", "NO_METAL")
-        return
+        # print(mol_path, "metal", "NO_METAL")
+        return mol_path, "metal", "NO_METAL"
     res, msg = topologically_valid(mol, structure, nisomorphs)
     if not res:
-        print(mol_path, "topolocial", msg)
-        return
+        # print(mol_path, "topolocial", msg)
+        return mol_path, "topolocial", msg
     res, msg = valid_valence(mol)
     if not res:
-        print(mol_path, "valence", msg)
-        return    
+        # print(mol_path, "valence", msg)
+        return mol_path, "valence", msg
     res, msg = valid_charge(mol_path, mol)
     if not res:
-        print(mol_path, "charge", msg)
-        return    
+        # print(mol_path, "charge", msg)
+        return mol_path, "charge", msg
     # if it passed all the tests, copy the file to the curated directory
-    shutil.copy(mol_path, target_path)
+    # shutil.copy(mol_path, target_path)
+    return mol_path, "valid", "VALID"
 
 def main(structure: str, nisomorphs: int, nworkers: int):
     print("initializing...")
@@ -156,9 +159,19 @@ def main(structure: str, nisomorphs: int, nworkers: int):
     print("starting conversion...")
     if nworkers > 1:
         with multiprocessing.Pool(nworkers) as pool:
-            pool.map(curate_structure, args)
+            outputs = list(tqdm(
+                pool.imap_unordered(curate_structure, args),
+                total=len(args),
+                desc="Curating structures",
+            ))
     else:
-        list(map(curate_structure, args))
+        outputs = list(tqdm(
+            map(curate_structure, args),
+            total=len(args),
+            desc="Curating structures",
+        ))
+    df = pd.DataFrame(outputs, columns=["mol_path", "group", "msg"])
+    df.to_csv("curation_report.csv")
     # cleaning garbage files 
     print("cleaning garbage...")
     utils.clean_directory(cur_dir, "xyz")
@@ -177,14 +190,15 @@ def test1():
     curate_structure((path, ".", "porphyrins", 1))
     # mol.ConnectTheDots()
     # res, msg = topologically_valid(mol, "porphyrins", 1)
+    
     # if not res:
     #     print(res, msg)
     # valid_valence(mol)
 
 
 if __name__ == "__main__":
-    test1()
-    exit()
+    # test1()
+    # exit()
     parser = utils.read_command_line_arguments("curate XYZ files using substructure matching", return_args=False)
     parser.add_argument("--nworkers", type=int, default=1, help="number of worker for parallel processing of files")
     parser.add_argument("--nisomorphs", type=int, default=1, help="number of distinct isomorphisms between definition and molecule (1=monomer, 2=dimer...)")
